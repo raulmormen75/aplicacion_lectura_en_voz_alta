@@ -149,6 +149,7 @@ async function extractFileText(file: File) {
 }
 
 async function extractPdfText(arrayBuffer: ArrayBuffer) {
+  ensurePdfRuntimePolyfills();
   const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
 
   pdfjs.GlobalWorkerOptions.workerSrc = pathToFileURL(
@@ -174,6 +175,80 @@ async function extractPdfText(arrayBuffer: ArrayBuffer) {
   }
 
   return pages.join("\n\n");
+}
+
+function ensurePdfRuntimePolyfills() {
+  type PdfGlobal = typeof globalThis & {
+    DOMMatrix?: typeof DOMMatrix;
+    ImageData?: typeof ImageData;
+    Path2D?: typeof Path2D;
+  };
+
+  const pdfGlobal = globalThis as PdfGlobal;
+
+  if (!pdfGlobal.DOMMatrix) {
+    class BasicDOMMatrix {
+      a = 1;
+      b = 0;
+      c = 0;
+      d = 1;
+      e = 0;
+      f = 0;
+
+      constructor(init?: number[]) {
+        if (Array.isArray(init) && init.length >= 6) {
+          [this.a, this.b, this.c, this.d, this.e, this.f] = init;
+        }
+      }
+
+      multiplySelf() {
+        return this;
+      }
+
+      preMultiplySelf() {
+        return this;
+      }
+
+      translate() {
+        return this;
+      }
+
+      scale() {
+        return this;
+      }
+
+      invertSelf() {
+        return this;
+      }
+    }
+
+    pdfGlobal.DOMMatrix = BasicDOMMatrix as unknown as typeof DOMMatrix;
+  }
+
+  if (!pdfGlobal.ImageData) {
+    class BasicImageData {
+      data: Uint8ClampedArray;
+      width: number;
+      height: number;
+
+      constructor(data: Uint8ClampedArray, width: number, height = 1) {
+        this.data = data;
+        this.width = width;
+        this.height = height;
+      }
+    }
+
+    pdfGlobal.ImageData = BasicImageData as unknown as typeof ImageData;
+  }
+
+  if (!pdfGlobal.Path2D) {
+    class BasicPath2D {
+      addPath() {}
+      rect() {}
+    }
+
+    pdfGlobal.Path2D = BasicPath2D as unknown as typeof Path2D;
+  }
 }
 
 async function extractWebsiteText(url: string) {
