@@ -1,7 +1,4 @@
 import { NextRequest, NextResponse } from "next/server";
-import { Readability } from "@mozilla/readability";
-import { JSDOM } from "jsdom";
-import mammoth from "mammoth";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { DocumentInitParameters } from "pdfjs-dist/types/src/display/api";
@@ -133,6 +130,7 @@ async function extractFileText(file: File) {
     mime.includes("msword") ||
     fileName.endsWith(".docx")
   ) {
+    const mammoth = await import("mammoth");
     const result = await mammoth.extractRawText({ buffer });
     return {
       text: result.value,
@@ -179,6 +177,10 @@ async function extractPdfText(arrayBuffer: ArrayBuffer) {
 }
 
 async function extractWebsiteText(url: string) {
+  const [{ Readability }, { JSDOM }] = await Promise.all([
+    import("@mozilla/readability"),
+    import("jsdom"),
+  ]);
   const response = await fetch(url, {
     headers: {
       "user-agent": "Lector Documental Raul/1.0",

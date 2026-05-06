@@ -169,6 +169,20 @@ export function ReaderApp() {
     setStatusMessage("Documento listo para escuchar.");
   }
 
+  async function readProcessResponse(response: Response, fallbackMessage: string) {
+    const contentType = response.headers.get("content-type") ?? "";
+
+    if (contentType.includes("application/json")) {
+      return (await response.json()) as ProcessResponse;
+    }
+
+    return {
+      error: response.ok
+        ? fallbackMessage
+        : "El servidor no pudo procesar el contenido. Intenta de nuevo o revisa el despliegue.",
+    } satisfies ProcessResponse;
+  }
+
   async function handleGoogleSignIn() {
     if (integrations.googleReady) {
       await signIn("google");
@@ -192,59 +206,74 @@ export function ReaderApp() {
     setIsProcessing(true);
     setStatusMessage("Extrayendo texto del archivo.");
 
-    const formData = new FormData();
-    formData.append("file", file);
-    const response = await fetch("/api/documents/process", {
-      method: "POST",
-      body: formData,
-    });
-    const data = (await response.json()) as ProcessResponse;
-    setIsProcessing(false);
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+      const response = await fetch("/api/documents/process", {
+        method: "POST",
+        body: formData,
+      });
+      const data = await readProcessResponse(response, "No se pudo procesar el archivo.");
 
-    if (data.document) {
-      setDocument(data.document);
-      return;
+      if (data.document) {
+        setDocument(data.document);
+        return;
+      }
+
+      setStatusMessage(data.error ?? "No se pudo procesar el archivo.");
+    } catch {
+      setStatusMessage("No se pudo conectar con el procesador de documentos.");
+    } finally {
+      setIsProcessing(false);
     }
-
-    setStatusMessage(data.error ?? "No se pudo procesar el archivo.");
   }
 
   async function processText() {
     setIsProcessing(true);
     setStatusMessage("Limpiando texto pegado.");
-    const response = await fetch("/api/documents/process", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        source: "pastedText",
-        title: "Texto pegado",
-        text: pastedText,
-      }),
-    });
-    const data = (await response.json()) as ProcessResponse;
-    setIsProcessing(false);
+    try {
+      const response = await fetch("/api/documents/process", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          source: "pastedText",
+          title: "Texto pegado",
+          text: pastedText,
+        }),
+      });
+      const data = await readProcessResponse(response, "No se pudo procesar el texto.");
 
-    if (data.document) setDocument(data.document);
-    else setStatusMessage(data.error ?? "No se pudo procesar el texto.");
+      if (data.document) setDocument(data.document);
+      else setStatusMessage(data.error ?? "No se pudo procesar el texto.");
+    } catch {
+      setStatusMessage("No se pudo conectar con el procesador de texto.");
+    } finally {
+      setIsProcessing(false);
+    }
   }
 
   async function processUrl(source: "website" | "googleDoc") {
     const targetUrl = source === "website" ? url : googleDocUrl;
     setIsProcessing(true);
     setStatusMessage(source === "website" ? "Leyendo sitio web." : "Importando Google Docs.");
-    const response = await fetch("/api/documents/process", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        source,
-        url: targetUrl,
-      }),
-    });
-    const data = (await response.json()) as ProcessResponse;
-    setIsProcessing(false);
+    try {
+      const response = await fetch("/api/documents/process", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          source,
+          url: targetUrl,
+        }),
+      });
+      const data = await readProcessResponse(response, "No se pudo procesar la liga.");
 
-    if (data.document) setDocument(data.document);
-    else setStatusMessage(data.error ?? "No se pudo procesar la liga.");
+      if (data.document) setDocument(data.document);
+      else setStatusMessage(data.error ?? "No se pudo procesar la liga.");
+    } catch {
+      setStatusMessage("No se pudo conectar con el procesador de ligas.");
+    } finally {
+      setIsProcessing(false);
+    }
   }
 
   function updateProgress(nextWord: number) {
