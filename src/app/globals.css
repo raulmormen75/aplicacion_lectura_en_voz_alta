@@ -428,21 +428,28 @@ button:focus-visible {
 }
 
 .document-text {
+  max-height: min(48vh, 560px);
+  overflow-y: auto;
   padding: clamp(22px, 4vw, 52px);
+  scroll-padding-block: 42%;
   font-size: clamp(1.12rem, 1.4vw, 1.42rem);
   font-weight: 560;
   line-height: 1.92;
+  white-space: pre-wrap;
 }
 
 .word {
   border-radius: 6px;
-  transition: background 160ms ease, color 160ms ease, box-shadow 160ms ease;
+  padding: 0.04em 0.1em;
+  transition: background 180ms ease, color 180ms ease, box-shadow 180ms ease;
 }
 
 .active-word {
   background: #ffe48c;
   color: #100d08;
-  box-shadow: inset 0 -3px 0 var(--gold);
+  box-shadow:
+    0 0 0 3px rgba(255, 228, 140, 0.34),
+    inset 0 -4px 0 var(--gold);
 }
 
 .theme-night .active-word {
@@ -797,6 +804,7 @@ button:focus-visible {
 
 .mode-focus .document-text {
   max-width: 920px;
+  max-height: 100vh;
   margin: 0 auto;
   padding-top: 18vh;
   font-size: clamp(1.38rem, 2.6vw, 2.2rem);

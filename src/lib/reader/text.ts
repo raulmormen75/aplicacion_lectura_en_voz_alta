@@ -51,6 +51,8 @@ export function tokenizeWords(text: string): WordToken[] {
     id: `w-${index}-${match.index ?? 0}`,
     text: match[0],
     wordIndex: index,
+    start: match.index ?? 0,
+    end: (match.index ?? 0) + match[0].length,
   }));
 }
 

@@ -21,6 +21,7 @@ import {
 import Image from "next/image";
 import { signIn } from "next-auth/react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { ChangeEvent } from "react";
 import {
   calculatePercentage,
   cleanTextWithoutInventing,
@@ -56,6 +57,9 @@ type IntegrationsStatus = {
 
 const SAMPLE_TEXT =
   "La lectura científica exige atención, ritmo y continuidad. Esta aplicación convierte documentos largos en una experiencia auditiva clara, con avance guardado, resaltado visual y controles diseñados para retomar el contenido sin perder el hilo.";
+const MAX_CLIENT_UPLOAD_BYTES = 25 * 1024 * 1024;
+const READER_WINDOW_BEFORE = 90;
+const READER_WINDOW_AFTER = 180;
 
 export function ReaderApp() {
   const [state, setState] = useState<StoredReaderState>(DEFAULT_READER_STATE);
@@ -67,6 +71,7 @@ export function ReaderApp() {
   const [isPlaying, setIsPlaying] = useState(false);
   const [voiceMenuOpen, setVoiceMenuOpen] = useState(false);
   const [statusMessage, setStatusMessage] = useState("Avance guardado en este dispositivo.");
+  const [systemVoices, setSystemVoices] = useState<SpeechSynthesisVoice[]>([]);
   const [integrations, setIntegrations] = useState<IntegrationsStatus>({
     googleReady: false,
     azureReady: false,
@@ -75,6 +80,10 @@ export function ReaderApp() {
   const [isHydrated, setIsHydrated] = useState(false);
   const utteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
   const intervalRef = useRef<number | null>(null);
+  const activeWordRef = useRef<HTMLSpanElement | null>(null);
+  const playbackSessionRef = useRef(0);
+  const shouldContinuePlaybackRef = useRef(false);
+  const progressWordRef = useRef(0);
 
   const clearProgressTimer = useCallback(() => {
     if (intervalRef.current) {
@@ -90,7 +99,51 @@ export function ReaderApp() {
     () => tokenizeWords(document?.cleanText ?? ""),
     [document?.cleanText],
   );
-  const currentWord = Math.min(state.progress.currentWord, Math.max(tokens.length - 1, 0));
+  const currentWord = Math.min(state.progress.currentWord, document?.wordCount ?? 0);
+  const visibleTextParts = useMemo(() => {
+    if (!document || tokens.length === 0) return [];
+
+    const startWord = Math.max(0, currentWord - READER_WINDOW_BEFORE);
+    const endWord = Math.min(tokens.length, currentWord + READER_WINDOW_AFTER);
+    const visibleWords = tokens.slice(startWord, endWord);
+    const windowStart = visibleWords[0]?.start ?? 0;
+    const windowEnd = visibleWords.at(-1)?.end ?? document.cleanText.length;
+    const parts: Array<{
+      id: string;
+      text: string;
+      type: "word" | "text";
+      wordIndex?: number;
+    }> = [];
+    let cursor = windowStart;
+
+    for (const token of visibleWords) {
+      if (token.start > cursor) {
+        parts.push({
+          id: `t-${cursor}-${token.start}`,
+          text: document.cleanText.slice(cursor, token.start),
+          type: "text",
+        });
+      }
+
+      parts.push({
+        id: token.id,
+        text: token.text,
+        type: "word",
+        wordIndex: token.wordIndex,
+      });
+      cursor = token.end;
+    }
+
+    if (cursor < windowEnd) {
+      parts.push({
+        id: `t-${cursor}-${windowEnd}`,
+        text: document.cleanText.slice(cursor, windowEnd),
+        type: "text",
+      });
+    }
+
+    return parts;
+  }, [currentWord, document, tokens]);
   const percentage = calculatePercentage(document?.wordCount ?? 0, currentWord);
   const remainingSeconds = estimateRemainingSeconds(
     document?.wordCount ?? 0,
@@ -103,6 +156,11 @@ export function ReaderApp() {
       setState(loadReaderState());
       setIsHydrated(true);
     });
+
+    const refreshVoices = () => setSystemVoices(window.speechSynthesis?.getVoices?.() ?? []);
+    refreshVoices();
+    window.speechSynthesis?.addEventListener?.("voiceschanged", refreshVoices);
+
     fetch("/api/integrations/status")
       .then((response) => response.json())
       .then((data: IntegrationsStatus) => setIntegrations(data))
@@ -113,10 +171,25 @@ export function ReaderApp() {
     }
 
     return () => {
+      shouldContinuePlaybackRef.current = false;
+      window.speechSynthesis?.removeEventListener?.("voiceschanged", refreshVoices);
       window.speechSynthesis?.cancel();
       clearProgressTimer();
     };
   }, [clearProgressTimer]);
+
+  useEffect(() => {
+    progressWordRef.current = currentWord;
+  }, [currentWord]);
+
+  useEffect(() => {
+    if (!activeWordRef.current) return;
+    activeWordRef.current.scrollIntoView({
+      behavior: "smooth",
+      block: "center",
+      inline: "nearest",
+    });
+  }, [currentWord]);
 
   useEffect(() => {
     if (!isHydrated) return;
@@ -142,6 +215,12 @@ export function ReaderApp() {
   }
 
   function setDocument(nextDocument: ReaderDocument) {
+    shouldContinuePlaybackRef.current = false;
+    playbackSessionRef.current += 1;
+    window.speechSynthesis.cancel();
+    clearProgressTimer();
+    setIsPlaying(false);
+
     const recommendedVoice = getVoiceForLanguage(nextDocument.detectedLanguage);
     setState((current) => ({
       ...current,
@@ -183,6 +262,12 @@ export function ReaderApp() {
     } satisfies ProcessResponse;
   }
 
+  function handleFileChange(event: ChangeEvent<HTMLInputElement>) {
+    const selectedFile = event.currentTarget.files?.[0] ?? null;
+    event.currentTarget.value = "";
+    void processFile(selectedFile);
+  }
+
   async function handleGoogleSignIn() {
     if (integrations.googleReady) {
       await signIn("google");
@@ -203,12 +288,23 @@ export function ReaderApp() {
 
   async function processFile(file: File | null) {
     if (!file) return;
+
+    if (file.size <= 0) {
+      setStatusMessage("El archivo llegó vacío. En móvil, descarga el PDF desde Drive y vuelve a seleccionarlo.");
+      return;
+    }
+
+    if (file.size > MAX_CLIENT_UPLOAD_BYTES) {
+      setStatusMessage("El archivo es demasiado grande. Usa un PDF menor a 25 MB.");
+      return;
+    }
+
     setIsProcessing(true);
     setStatusMessage("Extrayendo texto del archivo.");
 
     try {
       const formData = new FormData();
-      formData.append("file", file);
+      formData.append("file", file, file.name || "documento.pdf");
       const response = await fetch("/api/documents/process", {
         method: "POST",
         body: formData,
@@ -278,6 +374,7 @@ export function ReaderApp() {
 
   function updateProgress(nextWord: number) {
     const safeWord = Math.max(0, Math.min(nextWord, document?.wordCount ?? 0));
+    progressWordRef.current = safeWord;
     setState((current) => ({
       ...current,
       progress: {
@@ -295,62 +392,128 @@ export function ReaderApp() {
     }));
   }
 
-  function startProgressTimer(startWord: number) {
+  function getChunkForWord(wordIndex: number) {
+    if (!document) return null;
+    return (
+      document.chunks.find(
+        (chunk) => wordIndex >= chunk.startWord && wordIndex < chunk.startWord + chunk.wordCount,
+      ) ??
+      document.chunks.at(-1) ??
+      null
+    );
+  }
+
+  function getPreferredSystemVoice() {
+    const availableVoices = systemVoices.length
+      ? systemVoices
+      : window.speechSynthesis.getVoices();
+
+    return (
+      availableVoices.find(
+        (item) =>
+          item.lang === voice.locale &&
+          /female|mujer|ximena|dalia|sonia|ada/i.test(item.name),
+      ) ??
+      availableVoices.find((item) => item.lang === voice.locale) ??
+      availableVoices.find((item) => item.lang.startsWith(voice.locale.split("-")[0]))
+    );
+  }
+
+  function startProgressTimer(startWord: number, endWord: number, rate = preferences.rate) {
     clearProgressTimer();
-    const wordsPerSecond = (155 * preferences.rate) / 60;
-    const intervalMs = Math.max(280, Math.round(1000 / wordsPerSecond));
-    let localWord = startWord;
+    progressWordRef.current = startWord;
+    const wordsPerSecond = (130 * rate) / 60;
+    const intervalMs = Math.max(420, Math.round(1000 / wordsPerSecond));
 
     intervalRef.current = window.setInterval(() => {
-      localWord += 1;
-      if (!document || localWord >= document.wordCount) {
+      const nextWord = Math.min(progressWordRef.current + 1, endWord);
+      if (!document || nextWord <= progressWordRef.current) {
         clearProgressTimer();
-        setIsPlaying(false);
         return;
       }
-      updateProgress(localWord);
+
+      updateProgress(nextWord);
+
+      if (nextWord >= endWord) {
+        clearProgressTimer();
+      }
     }, intervalMs);
   }
 
-  function startSpeech(fromWord = currentWord) {
+  function startSpeech(fromWord = currentWord, sessionId?: number, rate = preferences.rate) {
     if (!document) return;
 
-    window.speechSynthesis.cancel();
-    clearProgressTimer();
+    const activeSession = sessionId ?? playbackSessionRef.current + 1;
+    playbackSessionRef.current = activeSession;
+    shouldContinuePlaybackRef.current = true;
 
-    const words = tokenizeWords(document.cleanText).map((token) => token.text);
-    const textToSpeak = words.slice(fromWord).join(" ");
+    if (!sessionId) {
+      window.speechSynthesis.cancel();
+      clearProgressTimer();
+    }
+
+    const safeFromWord = Math.max(0, Math.min(fromWord, document.wordCount));
+    const chunk = getChunkForWord(safeFromWord);
+    if (!chunk || safeFromWord >= document.wordCount) {
+      clearProgressTimer();
+      setIsPlaying(false);
+      setStatusMessage("Lectura terminada. Tu avance quedó guardado.");
+      return;
+    }
+
+    const chunkTokens = tokenizeWords(chunk.cleanText);
+    const localStartWord = Math.max(0, safeFromWord - chunk.startWord);
+    const startChar = chunkTokens[localStartWord]?.start ?? 0;
+    const textToSpeak = chunk.cleanText.slice(startChar).trim();
+    const speechBaseWord = chunk.startWord + localStartWord;
+    const chunkEndWord = Math.min(chunk.startWord + chunk.wordCount, document.wordCount);
+
+    if (!textToSpeak) {
+      startSpeech(chunkEndWord, activeSession, rate);
+      return;
+    }
+
     const utterance = new SpeechSynthesisUtterance(textToSpeak);
-    const systemVoices = window.speechSynthesis.getVoices();
-    const preferredSystemVoice =
-      systemVoices.find((item) => item.lang === voice.locale && /female|mujer|ximena|dalia|sonia|ada/i.test(item.name)) ??
-      systemVoices.find((item) => item.lang === voice.locale) ??
-      systemVoices.find((item) => item.lang.startsWith(voice.locale.split("-")[0]));
+    const preferredSystemVoice = getPreferredSystemVoice();
 
     if (preferredSystemVoice) utterance.voice = preferredSystemVoice;
     utterance.lang = voice.locale;
-    utterance.rate = preferences.rate;
+    utterance.rate = rate;
     utterance.pitch = voice.gender === "female" ? 1.04 : 0.92;
 
     utterance.onboundary = (event) => {
-      if (event.name !== "word") return;
+      if (playbackSessionRef.current !== activeSession) return;
+      if (event.name && event.name !== "word") return;
       const spoken = textToSpeak.slice(0, event.charIndex);
-      updateProgress(fromWord + Math.max(0, countWords(spoken)));
+      const nextWord = speechBaseWord + Math.max(0, countWords(spoken));
+      updateProgress(Math.max(progressWordRef.current, nextWord));
     };
     utterance.onend = () => {
       clearProgressTimer();
+      if (playbackSessionRef.current !== activeSession) return;
+
+      updateProgress(Math.max(progressWordRef.current, chunkEndWord));
+
+      if (shouldContinuePlaybackRef.current && chunkEndWord < document.wordCount) {
+        startSpeech(chunkEndWord, activeSession, rate);
+        return;
+      }
+
       setIsPlaying(false);
       setStatusMessage("Lectura terminada. Tu avance quedó guardado.");
     };
     utterance.onerror = () => {
+      if (playbackSessionRef.current !== activeSession) return;
       clearProgressTimer();
       setIsPlaying(false);
+      shouldContinuePlaybackRef.current = false;
       setStatusMessage("La voz del navegador se interrumpió. Intenta reproducir de nuevo.");
     };
 
     utteranceRef.current = utterance;
+    updateProgress(speechBaseWord);
     window.speechSynthesis.speak(utterance);
-    startProgressTimer(fromWord);
+    startProgressTimer(speechBaseWord, chunkEndWord, rate);
     setIsPlaying(true);
     setStatusMessage(
       integrations.azureReady
@@ -371,8 +534,13 @@ export function ReaderApp() {
     }
 
     if (window.speechSynthesis.paused && utteranceRef.current) {
+      shouldContinuePlaybackRef.current = true;
       window.speechSynthesis.resume();
-      startProgressTimer(currentWord);
+      const chunk = getChunkForWord(currentWord);
+      startProgressTimer(
+        currentWord,
+        Math.min((chunk?.startWord ?? currentWord) + (chunk?.wordCount ?? 0), document.wordCount),
+      );
       setIsPlaying(true);
       setStatusMessage("Lectura reanudada.");
       return;
@@ -387,13 +555,15 @@ export function ReaderApp() {
     const wordsToMove = Math.round(((155 * preferences.rate) / 60) * seconds);
     const nextWord = Math.max(0, Math.min(document.wordCount, currentWord + wordsToMove));
 
+    shouldContinuePlaybackRef.current = false;
+    playbackSessionRef.current += 1;
     window.speechSynthesis.cancel();
     clearProgressTimer();
     updateProgress(nextWord);
     setIsPlaying(false);
 
     if (wasPlaying) {
-      window.setTimeout(() => startSpeech(nextWord), 120);
+      startSpeech(nextWord);
     }
   }
 
@@ -401,11 +571,23 @@ export function ReaderApp() {
     updatePreferences({ rate });
     setStatusMessage(`Velocidad actualizada a ${rate === 1 ? "Normal" : rate}.`);
     if (isPlaying) {
+      shouldContinuePlaybackRef.current = false;
+      playbackSessionRef.current += 1;
       window.speechSynthesis.cancel();
       clearProgressTimer();
       setIsPlaying(false);
-      window.setTimeout(() => startSpeech(currentWord), 120);
+      startSpeech(currentWord, undefined, rate);
     }
+  }
+
+  function resetReading() {
+    shouldContinuePlaybackRef.current = false;
+    playbackSessionRef.current += 1;
+    window.speechSynthesis.cancel();
+    clearProgressTimer();
+    setIsPlaying(false);
+    updateProgress(0);
+    setStatusMessage("Lectura reiniciada. Avance guardado.");
   }
 
   async function applyCleanOnly() {
@@ -531,8 +713,8 @@ export function ReaderApp() {
                 <label className="upload-drop">
                   <input
                     type="file"
-                    accept=".pdf,.doc,.docx,.txt,.md,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain"
-                    onChange={(event) => processFile(event.target.files?.[0] ?? null)}
+                    accept=".pdf,.doc,.docx,.txt,.md,application/pdf,application/x-pdf,application/acrobat,applications/vnd.pdf,application/octet-stream,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain"
+                    onChange={handleFileChange}
                   />
                   <FileText size={24} />
                   <span>Seleccionar PDF, Word o texto</span>
@@ -585,14 +767,19 @@ export function ReaderApp() {
                   <strong>{percentage}% leído</strong>
                 </div>
                 <div className="document-text">
-                  {tokens.map((token) => (
-                    <span
-                      key={token.id}
-                      className={token.wordIndex === currentWord ? "word active-word" : "word"}
-                    >
-                      {token.text}{" "}
-                    </span>
-                  ))}
+                  {visibleTextParts.map((part) =>
+                    part.type === "word" ? (
+                      <span
+                        key={part.id}
+                        ref={part.wordIndex === currentWord ? activeWordRef : undefined}
+                        className={part.wordIndex === currentWord ? "word active-word" : "word"}
+                      >
+                        {part.text}
+                      </span>
+                    ) : (
+                      <span key={part.id}>{part.text}</span>
+                    ),
+                  )}
                 </div>
               </article>
             ) : (
@@ -748,7 +935,7 @@ export function ReaderApp() {
           ))}
         </div>
 
-        <button className="reset-button" type="button" onClick={() => updateProgress(0)}>
+        <button className="reset-button" type="button" onClick={resetReading}>
           <RotateCcw size={18} />
           Reiniciar
         </button>

@@ -7,6 +7,17 @@ import { cleanTextForSpeech, createDocumentFromText, incoherenceScore } from "@/
 
 export const runtime = "nodejs";
 
+const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
+
+class DocumentProcessError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+  }
+}
+
 const textPayloadSchema = z.object({
   source: z.enum(["pastedText", "website", "googleDoc"]),
   title: z.string().min(1).max(180).optional(),
@@ -22,7 +33,21 @@ export async function POST(request: NextRequest) {
       const formData = await request.formData();
       const file = formData.get("file");
       if (!(file instanceof File)) {
-        return NextResponse.json({ error: "No se recibió un archivo válido." }, { status: 400 });
+        throw new DocumentProcessError("No se recibió un archivo válido.", 400);
+      }
+
+      if (file.size <= 0) {
+        throw new DocumentProcessError(
+          "El archivo llegó vacío. En móvil, descarga el PDF desde Drive y vuelve a seleccionarlo.",
+          400,
+        );
+      }
+
+      if (file.size > MAX_UPLOAD_BYTES) {
+        throw new DocumentProcessError(
+          "El archivo es demasiado grande para procesarlo en línea. Prueba con un PDF menor a 25 MB.",
+          413,
+        );
       }
 
       const extracted = await extractFileText(file);
@@ -31,7 +56,7 @@ export async function POST(request: NextRequest) {
       const status = extracted.needsOcr || qualityScore > 0.22 ? "needs-ocr" : "ready";
 
       const document = createDocumentFromText({
-        title: file.name,
+        title: file.name || "Documento importado",
         source: "file",
         sourceLabel: file.type || "archivo local",
         text: extracted.text,
@@ -60,7 +85,7 @@ export async function POST(request: NextRequest) {
 
     if (payload.source === "website") {
       if (!payload.url) {
-        return NextResponse.json({ error: "Pega una dirección web válida." }, { status: 400 });
+        throw new DocumentProcessError("Pega una dirección web válida.", 400);
       }
 
       const article = await extractWebsiteText(payload.url);
@@ -77,7 +102,7 @@ export async function POST(request: NextRequest) {
 
     if (payload.source === "googleDoc") {
       if (!payload.url) {
-        return NextResponse.json({ error: "Pega una liga de Google Docs válida." }, { status: 400 });
+        throw new DocumentProcessError("Pega una liga de Google Docs válida.", 400);
       }
 
       const exported = await extractGoogleDocText(payload.url);
@@ -93,7 +118,7 @@ export async function POST(request: NextRequest) {
     }
 
     if (!payload.text?.trim()) {
-      return NextResponse.json({ error: "Pega texto antes de iniciar la lectura." }, { status: 400 });
+      throw new DocumentProcessError("Pega texto antes de iniciar la lectura.", 400);
     }
 
     return NextResponse.json({
@@ -106,6 +131,14 @@ export async function POST(request: NextRequest) {
       }),
     });
   } catch (error) {
+    if (error instanceof DocumentProcessError) {
+      return NextResponse.json({ error: error.message }, { status: error.status });
+    }
+
+    if (error instanceof z.ZodError) {
+      return NextResponse.json({ error: "La solicitud no tiene un formato válido." }, { status: 400 });
+    }
+
     const message = error instanceof Error ? error.message : "No se pudo procesar el contenido.";
     return NextResponse.json({ error: message }, { status: 500 });
   }
@@ -116,9 +149,17 @@ async function extractFileText(file: File) {
   const buffer = Buffer.from(arrayBuffer);
   const fileName = file.name.toLowerCase();
   const mime = file.type;
+  const isPdf = isPdfFile(buffer, mime, fileName);
 
-  if (mime.includes("pdf") || fileName.endsWith(".pdf")) {
+  if (isPdf) {
     const text = await extractPdfText(arrayBuffer);
+    if (!text.trim()) {
+      throw new DocumentProcessError(
+        "No se encontró texto legible en el PDF. Si es escaneado, prueba con OCR o un PDF con texto seleccionable.",
+        422,
+      );
+    }
+
     return {
       text,
       needsOcr: text.trim().length < 80,
@@ -145,7 +186,12 @@ async function extractFileText(file: File) {
     };
   }
 
-  throw new Error("Formato no compatible. Sube PDF, Word o texto.");
+  throw new DocumentProcessError("Formato no compatible. Sube PDF, Word o texto.", 415);
+}
+
+function isPdfFile(buffer: Buffer, mime: string, fileName: string) {
+  const signature = buffer.subarray(0, 5).toString("latin1");
+  return signature === "%PDF-" || mime.includes("pdf") || fileName.endsWith(".pdf");
 }
 
 async function extractPdfText(arrayBuffer: ArrayBuffer) {

@@ -24,6 +24,8 @@ export type WordToken = {
   id: string;
   text: string;
   wordIndex: number;
+  start: number;
+  end: number;
 };
 
 export type TextChunk = {
