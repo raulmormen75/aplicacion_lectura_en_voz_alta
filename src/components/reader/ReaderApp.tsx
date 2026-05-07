@@ -179,13 +179,67 @@ export function ReaderApp() {
   }, [currentWord]);
 
   useEffect(() => {
-    if (!activeWordRef.current) return;
-    activeWordRef.current.scrollIntoView({
+    const activeWord = activeWordRef.current;
+    if (!activeWord) return;
+
+    const readingPane = activeWord.closest(".document-text") as HTMLElement | null;
+    if (readingPane) {
+      const paneRect = readingPane.getBoundingClientRect();
+      const wordRect = activeWord.getBoundingClientRect();
+      const nextTop =
+        readingPane.scrollTop + wordRect.top - paneRect.top - readingPane.clientHeight * 0.46;
+
+      readingPane.scrollTo({
+        top: Math.max(0, nextTop),
+        behavior: "smooth",
+      });
+      return;
+    }
+
+    activeWord.scrollIntoView({
       behavior: "smooth",
       block: "center",
       inline: "nearest",
     });
   }, [currentWord]);
+
+  useEffect(() => {
+    if (!isHydrated || preferences.readingMode !== "focus") return;
+
+    const root = globalThis.document.documentElement;
+    const body = globalThis.document.body;
+    const scrollY = window.scrollY;
+    const previousRootOverflow = root.style.overflow;
+    const previousRootOverscroll = root.style.overscrollBehavior;
+    const previousBodyOverflow = body.style.overflow;
+    const previousBodyOverscroll = body.style.overscrollBehavior;
+    const previousBodyPosition = body.style.position;
+    const previousBodyTop = body.style.top;
+    const previousBodyWidth = body.style.width;
+
+    root.classList.add("reader-focus-scroll-lock");
+    body.classList.add("reader-focus-scroll-lock");
+    root.style.overflow = "hidden";
+    root.style.overscrollBehavior = "none";
+    body.style.overflow = "hidden";
+    body.style.overscrollBehavior = "none";
+    body.style.position = "fixed";
+    body.style.top = `-${scrollY}px`;
+    body.style.width = "100%";
+
+    return () => {
+      root.classList.remove("reader-focus-scroll-lock");
+      body.classList.remove("reader-focus-scroll-lock");
+      root.style.overflow = previousRootOverflow;
+      root.style.overscrollBehavior = previousRootOverscroll;
+      body.style.overflow = previousBodyOverflow;
+      body.style.overscrollBehavior = previousBodyOverscroll;
+      body.style.position = previousBodyPosition;
+      body.style.top = previousBodyTop;
+      body.style.width = previousBodyWidth;
+      window.scrollTo(0, scrollY);
+    };
+  }, [isHydrated, preferences.readingMode]);
 
   useEffect(() => {
     if (!isHydrated) return;
@@ -625,6 +679,7 @@ export function ReaderApp() {
     updatePreferences({ readingMode: nextMode });
 
     if (nextMode === "focus") {
+      window.scrollTo(0, 0);
       await documentElementFullscreen();
     } else if (globalThis.document.fullscreenElement) {
       await globalThis.document.exitFullscreen();
@@ -695,7 +750,7 @@ export function ReaderApp() {
           onClick={() => updatePreferences({ theme: "warm-paper" })}
         >
           <SunMedium size={18} />
-          Papel cÃ¡lido
+          Papel cálido
         </button>
         <button
           type="button"
