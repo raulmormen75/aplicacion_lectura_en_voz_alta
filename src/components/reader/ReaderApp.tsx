@@ -3,12 +3,10 @@
 import {
   ChevronLeft,
   ChevronRight,
-  Cloud,
   FileText,
   Globe2,
   Headphones,
   Home,
-  LogIn,
   Moon,
   Pause,
   Play,
@@ -19,7 +17,6 @@ import {
   Type,
 } from "lucide-react";
 import Image from "next/image";
-import { signIn } from "next-auth/react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent, MouseEvent } from "react";
 import {
@@ -49,7 +46,6 @@ type ProcessResponse = {
 };
 
 type IntegrationsStatus = {
-  googleReady: boolean;
   gptOssReady: boolean;
 };
 
@@ -58,27 +54,23 @@ const SAMPLE_TEXT =
 const MAX_CLIENT_UPLOAD_BYTES = 25 * 1024 * 1024;
 const READER_WINDOW_BEFORE = 90;
 const READER_WINDOW_AFTER = 180;
-const FOCUS_CONTROLS_IDLE_MS = 120000;
 
 export function ReaderApp() {
   const [state, setState] = useState<StoredReaderState>(DEFAULT_READER_STATE);
   const [activePanel, setActivePanel] = useState<"file" | "text" | "web">("file");
   const [pastedText, setPastedText] = useState(SAMPLE_TEXT);
   const [url, setUrl] = useState("");
-  const [googleDocUrl, setGoogleDocUrl] = useState("");
   const [isProcessing, setIsProcessing] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
   const [focusControlsVisible, setFocusControlsVisible] = useState(true);
   const [statusMessage, setStatusMessage] = useState("Avance guardado en este dispositivo.");
   const [systemVoices, setSystemVoices] = useState<SpeechSynthesisVoice[]>([]);
   const [integrations, setIntegrations] = useState<IntegrationsStatus>({
-    googleReady: false,
     gptOssReady: false,
   });
   const [isHydrated, setIsHydrated] = useState(false);
   const utteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
   const intervalRef = useRef<number | null>(null);
-  const focusControlsTimerRef = useRef<number | null>(null);
   const activeWordRef = useRef<HTMLSpanElement | null>(null);
   const playbackSessionRef = useRef(0);
   const shouldContinuePlaybackRef = useRef(false);
@@ -94,22 +86,6 @@ export function ReaderApp() {
       intervalRef.current = null;
     }
   }, []);
-
-  const clearFocusControlsTimer = useCallback(() => {
-    if (focusControlsTimerRef.current) {
-      window.clearTimeout(focusControlsTimerRef.current);
-      focusControlsTimerRef.current = null;
-    }
-  }, []);
-
-  const scheduleFocusControlsAutoHide = useCallback(() => {
-    clearFocusControlsTimer();
-    if (preferences.readingMode !== "focus" || !isPlaying) return;
-
-    focusControlsTimerRef.current = window.setTimeout(() => {
-      setFocusControlsVisible(false);
-    }, FOCUS_CONTROLS_IDLE_MS);
-  }, [clearFocusControlsTimer, isPlaying, preferences.readingMode]);
 
   const tokens = useMemo(
     () => tokenizeWords(document?.cleanText ?? ""),
@@ -191,15 +167,13 @@ export function ReaderApp() {
       window.speechSynthesis?.removeEventListener?.("voiceschanged", refreshVoices);
       window.speechSynthesis?.cancel();
       clearProgressTimer();
-      clearFocusControlsTimer();
     };
-  }, [clearFocusControlsTimer, clearProgressTimer]);
+  }, [clearProgressTimer]);
 
   useEffect(() => {
     let revealTimer: number | null = null;
 
     if (preferences.readingMode !== "focus") {
-      clearFocusControlsTimer();
       revealTimer = window.setTimeout(() => setFocusControlsVisible(true), 0);
       return () => {
         if (revealTimer) window.clearTimeout(revealTimer);
@@ -207,34 +181,10 @@ export function ReaderApp() {
     }
 
     revealTimer = window.setTimeout(() => setFocusControlsVisible(true), 0);
-    scheduleFocusControlsAutoHide();
     return () => {
       if (revealTimer) window.clearTimeout(revealTimer);
-      clearFocusControlsTimer();
     };
-  }, [
-    clearFocusControlsTimer,
-    isPlaying,
-    preferences.readingMode,
-    scheduleFocusControlsAutoHide,
-  ]);
-
-  useEffect(() => {
-    if (preferences.readingMode !== "focus") return;
-
-    const revealFocusControls = () => {
-      setFocusControlsVisible(true);
-      scheduleFocusControlsAutoHide();
-    };
-
-    window.addEventListener("pointerdown", revealFocusControls, { passive: true });
-    window.addEventListener("keydown", revealFocusControls);
-
-    return () => {
-      window.removeEventListener("pointerdown", revealFocusControls);
-      window.removeEventListener("keydown", revealFocusControls);
-    };
-  }, [preferences.readingMode, scheduleFocusControlsAutoHide]);
+  }, [preferences.readingMode]);
 
   useEffect(() => {
     progressWordRef.current = currentWord;
@@ -372,24 +322,6 @@ export function ReaderApp() {
     void processFile(selectedFile);
   }
 
-  async function handleGoogleSignIn() {
-    if (integrations.googleReady) {
-      await signIn("google");
-      return;
-    }
-
-    setState((current) => ({
-      ...current,
-      session: {
-        signedIn: true,
-        userName: "Raul",
-      },
-    }));
-    setStatusMessage(
-      "Modo local activo. Configura Google OAuth para sincronizar entre dispositivos.",
-    );
-  }
-
   async function processFile(file: File | null) {
     if (!file) return;
 
@@ -452,16 +384,16 @@ export function ReaderApp() {
     }
   }
 
-  async function processUrl(source: "website" | "googleDoc") {
-    const targetUrl = source === "website" ? url : googleDocUrl;
+  async function processUrl() {
+    const targetUrl = url;
     setIsProcessing(true);
-    setStatusMessage(source === "website" ? "Leyendo sitio web." : "Importando Google Docs.");
+    setStatusMessage("Leyendo sitio web.");
     try {
       const response = await fetch("/api/documents/process", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          source,
+          source: "website",
           url: targetUrl,
         }),
       });
@@ -694,6 +626,17 @@ export function ReaderApp() {
     changeRate(Number(event.currentTarget.dataset.rate) as PlaybackRate);
   }
 
+  function toggleFocusControlsFromReading() {
+    if (preferences.readingMode !== "focus") return;
+    setFocusControlsVisible((visible) => !visible);
+  }
+
+  function toggleFocusTheme() {
+    updatePreferences({
+      theme: preferences.theme === "night" ? "warm-paper" : "night",
+    });
+  }
+
   function resetReading() {
     shouldContinuePlaybackRef.current = false;
     playbackSessionRef.current += 1;
@@ -742,6 +685,7 @@ export function ReaderApp() {
 
   async function toggleFocusMode() {
     const nextMode = preferences.readingMode === "focus" ? "standard" : "focus";
+    setFocusControlsVisible(true);
     updatePreferences({ readingMode: nextMode });
 
     if (nextMode === "focus") {
@@ -852,6 +796,21 @@ export function ReaderApp() {
           ))}
         </div>
 
+        <button
+          className="focus-theme-toggle"
+          type="button"
+          onClick={toggleFocusTheme}
+          aria-label={
+            preferences.theme === "night" ? "Cambiar a papel cálido" : "Cambiar a lectura nocturna"
+          }
+          title={
+            preferences.theme === "night" ? "Cambiar a papel cálido" : "Cambiar a lectura nocturna"
+          }
+        >
+          {preferences.theme === "night" ? <SunMedium size={16} /> : <Moon size={16} />}
+          <span>{preferences.theme === "night" ? "Papel" : "Noche"}</span>
+        </button>
+
         <button className="focus-exit-action" type="button" onClick={toggleFocusMode}>
           Salir
         </button>
@@ -910,10 +869,6 @@ export function ReaderApp() {
           </div>
         </div>
 
-        <button className="google-button" type="button" onClick={handleGoogleSignIn}>
-          <LogIn size={18} />
-          {state.session.signedIn ? "Google conectado" : "Iniciar sesión con Google"}
-        </button>
       </header>
 
       <section className="workspace-grid">
@@ -947,13 +902,6 @@ export function ReaderApp() {
             <span>Leer sitio web</span>
           </button>
 
-          <div className="panel-card compact-status">
-            <Cloud size={18} />
-            <p>
-              Sincronización con Google.{" "}
-              <strong>{integrations.googleReady ? "Lista" : "pendiente de credenciales"}</strong>
-            </p>
-          </div>
         </aside>
 
         <section className="reader-center">
@@ -969,16 +917,6 @@ export function ReaderApp() {
                   <FileText size={24} />
                   <span>Seleccionar PDF, Word o texto</span>
                 </label>
-                <div className="inline-form">
-                  <input
-                    value={googleDocUrl}
-                    onChange={(event) => setGoogleDocUrl(event.target.value)}
-                    placeholder="Liga de Google Docs compartida"
-                  />
-                  <button type="button" onClick={() => processUrl("googleDoc")}>
-                    Google Docs
-                  </button>
-                </div>
               </div>
             ) : null}
 
@@ -1002,7 +940,7 @@ export function ReaderApp() {
                   onChange={(event) => setUrl(event.target.value)}
                   placeholder="https://sitio.com/articulo"
                 />
-                <button type="button" onClick={() => processUrl("website")}>
+                <button type="button" onClick={processUrl}>
                   Leer sitio
                 </button>
               </div>
@@ -1027,7 +965,17 @@ export function ReaderApp() {
                   <span>{formatRemainingTime(remainingSeconds)} restantes</span>
                   <strong>{percentage}% leído</strong>
                 </div>
-                <div className="document-text">
+                <div
+                  className="document-text"
+                  onClick={toggleFocusControlsFromReading}
+                  title={
+                    preferences.readingMode === "focus"
+                      ? focusControlsVisible
+                        ? "Ocultar controles"
+                        : "Mostrar controles"
+                      : undefined
+                  }
+                >
                   {visibleTextParts.map((part) =>
                     part.type === "word" ? (
                       <span
