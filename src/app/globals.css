@@ -754,13 +754,7 @@ button:focus-visible {
 }
 
 .mode-focus .reading-metrics {
-  position: absolute;
-  top: 16px;
-  right: 0;
-  left: 0;
-  border: 0;
-  background: transparent;
-  pointer-events: none;
+  display: none;
 }
 
 .mode-focus .document-text {
@@ -782,21 +776,112 @@ button:focus-visible {
   color: inherit;
 }
 
-.focus-exit {
+.focus-control-dock {
   position: fixed;
-  top: 18px;
-  right: 18px;
-  z-index: 40;
-  min-height: 42px;
-  border-radius: 999px;
-  padding: 0 16px;
-  opacity: 0.18;
-  transition: opacity 180ms ease;
+  right: max(14px, env(safe-area-inset-right));
+  bottom: max(14px, env(safe-area-inset-bottom));
+  left: max(14px, env(safe-area-inset-left));
+  z-index: 70;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+  max-width: 820px;
+  margin: 0 auto;
+  border: 1px solid rgba(242, 242, 238, 0.16);
+  border-radius: 22px;
+  background: rgba(11, 11, 11, 0.68);
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.44);
+  padding: 9px;
+  backdrop-filter: blur(20px);
 }
 
-.focus-exit:hover,
-.focus-exit:focus-visible {
-  opacity: 1;
+.focus-readout {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.focus-readout span,
+.focus-readout strong {
+  border-radius: 999px;
+  padding: 5px 9px;
+  font-size: 0.76rem;
+  font-weight: 820;
+}
+
+.focus-readout span {
+  background: rgba(242, 242, 238, 0.1);
+  color: var(--ivory);
+}
+
+.focus-readout strong {
+  background: var(--gold);
+  color: #130f08;
+}
+
+.focus-transport,
+.focus-speed {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+}
+
+.focus-control-dock button {
+  display: inline-flex;
+  min-height: 34px;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  border-radius: 12px;
+  padding: 0 9px;
+  font-size: 0.76rem;
+  font-weight: 800;
+}
+
+.focus-play-button {
+  min-width: 92px;
+  border-color: rgba(198, 167, 94, 0.5);
+  background: var(--gold);
+  color: #130f08;
+}
+
+.focus-speed {
+  border-radius: 14px;
+  background: rgba(242, 242, 238, 0.07);
+  padding: 3px;
+}
+
+.focus-speed button {
+  min-width: 52px;
+  border: 0;
+  background: transparent;
+}
+
+.focus-speed button.active {
+  background: rgba(198, 167, 94, 0.36);
+  color: var(--ivory);
+}
+
+.focus-exit-action {
+  border-color: rgba(198, 167, 94, 0.36);
+  background: rgba(198, 167, 94, 0.16);
+}
+
+.focus-control-dock button:hover,
+.focus-control-dock button:focus-visible {
+  border-color: rgba(198, 167, 94, 0.5);
+  background: rgba(198, 167, 94, 0.2);
+}
+
+.focus-control-dock .focus-play-button:hover,
+.focus-control-dock .focus-play-button:focus-visible {
+  background: var(--gold);
+  color: #130f08;
 }
 
 @keyframes pulse {
@@ -913,6 +998,48 @@ button:focus-visible {
     padding: 18dvh 24px 22dvh;
     font-size: clamp(1.28rem, 7vw, 2rem);
     line-height: 1.72;
+  }
+
+  .focus-control-dock {
+    grid-template-columns: 1fr auto;
+    gap: 7px;
+    border-radius: 18px;
+    padding: 8px;
+  }
+
+  .focus-readout {
+    justify-self: start;
+  }
+
+  .focus-transport {
+    display: grid;
+    width: 100%;
+    grid-template-columns: 0.82fr 0.82fr 1.3fr 0.82fr 0.82fr;
+    grid-column: 1 / -1;
+  }
+
+  .focus-control-dock button {
+    min-width: 0;
+    min-height: 30px;
+    padding: 0 7px;
+    font-size: 0.72rem;
+  }
+
+  .focus-play-button {
+    min-width: 0;
+  }
+
+  .focus-speed {
+    width: 100%;
+    grid-column: 1 / -1;
+  }
+
+  .focus-speed button {
+    flex: 1;
+  }
+
+  .focus-exit-action {
+    justify-self: end;
   }
 
   .library-panel {
@@ -1073,6 +1200,23 @@ button:focus-visible {
   .mode-focus .document-text {
     padding: 14dvh 28px 18dvh;
     line-height: 1.6;
+  }
+
+  .focus-control-dock {
+    grid-template-columns: auto minmax(0, 1fr) auto auto;
+    gap: 6px;
+    padding: 7px;
+  }
+
+  .focus-readout span,
+  .focus-readout strong,
+  .focus-control-dock button {
+    font-size: 0.7rem;
+  }
+
+  .focus-control-dock button {
+    min-height: 30px;
+    padding: 0 7px;
   }
 }
 

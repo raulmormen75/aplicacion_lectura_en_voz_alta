@@ -21,7 +21,7 @@ import {
 import Image from "next/image";
 import { signIn } from "next-auth/react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { ChangeEvent } from "react";
+import type { ChangeEvent, MouseEvent } from "react";
 import {
   calculatePercentage,
   cleanTextWithoutInventing,
@@ -58,6 +58,7 @@ const SAMPLE_TEXT =
 const MAX_CLIENT_UPLOAD_BYTES = 25 * 1024 * 1024;
 const READER_WINDOW_BEFORE = 90;
 const READER_WINDOW_AFTER = 180;
+const FOCUS_CONTROLS_IDLE_MS = 120000;
 
 export function ReaderApp() {
   const [state, setState] = useState<StoredReaderState>(DEFAULT_READER_STATE);
@@ -67,6 +68,7 @@ export function ReaderApp() {
   const [googleDocUrl, setGoogleDocUrl] = useState("");
   const [isProcessing, setIsProcessing] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
+  const [focusControlsVisible, setFocusControlsVisible] = useState(true);
   const [statusMessage, setStatusMessage] = useState("Avance guardado en este dispositivo.");
   const [systemVoices, setSystemVoices] = useState<SpeechSynthesisVoice[]>([]);
   const [integrations, setIntegrations] = useState<IntegrationsStatus>({
@@ -76,11 +78,15 @@ export function ReaderApp() {
   const [isHydrated, setIsHydrated] = useState(false);
   const utteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
   const intervalRef = useRef<number | null>(null);
+  const focusControlsTimerRef = useRef<number | null>(null);
   const activeWordRef = useRef<HTMLSpanElement | null>(null);
   const playbackSessionRef = useRef(0);
   const shouldContinuePlaybackRef = useRef(false);
   const progressWordRef = useRef(0);
   const boundarySeenRef = useRef(false);
+
+  const document = state.document;
+  const preferences = state.preferences;
 
   const clearProgressTimer = useCallback(() => {
     if (intervalRef.current) {
@@ -89,8 +95,22 @@ export function ReaderApp() {
     }
   }, []);
 
-  const document = state.document;
-  const preferences = state.preferences;
+  const clearFocusControlsTimer = useCallback(() => {
+    if (focusControlsTimerRef.current) {
+      window.clearTimeout(focusControlsTimerRef.current);
+      focusControlsTimerRef.current = null;
+    }
+  }, []);
+
+  const scheduleFocusControlsAutoHide = useCallback(() => {
+    clearFocusControlsTimer();
+    if (preferences.readingMode !== "focus" || !isPlaying) return;
+
+    focusControlsTimerRef.current = window.setTimeout(() => {
+      setFocusControlsVisible(false);
+    }, FOCUS_CONTROLS_IDLE_MS);
+  }, [clearFocusControlsTimer, isPlaying, preferences.readingMode]);
+
   const tokens = useMemo(
     () => tokenizeWords(document?.cleanText ?? ""),
     [document?.cleanText],
@@ -171,8 +191,50 @@ export function ReaderApp() {
       window.speechSynthesis?.removeEventListener?.("voiceschanged", refreshVoices);
       window.speechSynthesis?.cancel();
       clearProgressTimer();
+      clearFocusControlsTimer();
     };
-  }, [clearProgressTimer]);
+  }, [clearFocusControlsTimer, clearProgressTimer]);
+
+  useEffect(() => {
+    let revealTimer: number | null = null;
+
+    if (preferences.readingMode !== "focus") {
+      clearFocusControlsTimer();
+      revealTimer = window.setTimeout(() => setFocusControlsVisible(true), 0);
+      return () => {
+        if (revealTimer) window.clearTimeout(revealTimer);
+      };
+    }
+
+    revealTimer = window.setTimeout(() => setFocusControlsVisible(true), 0);
+    scheduleFocusControlsAutoHide();
+    return () => {
+      if (revealTimer) window.clearTimeout(revealTimer);
+      clearFocusControlsTimer();
+    };
+  }, [
+    clearFocusControlsTimer,
+    isPlaying,
+    preferences.readingMode,
+    scheduleFocusControlsAutoHide,
+  ]);
+
+  useEffect(() => {
+    if (preferences.readingMode !== "focus") return;
+
+    const revealFocusControls = () => {
+      setFocusControlsVisible(true);
+      scheduleFocusControlsAutoHide();
+    };
+
+    window.addEventListener("pointerdown", revealFocusControls, { passive: true });
+    window.addEventListener("keydown", revealFocusControls);
+
+    return () => {
+      window.removeEventListener("pointerdown", revealFocusControls);
+      window.removeEventListener("keydown", revealFocusControls);
+    };
+  }, [preferences.readingMode, scheduleFocusControlsAutoHide]);
 
   useEffect(() => {
     progressWordRef.current = currentWord;
@@ -628,6 +690,10 @@ export function ReaderApp() {
     }
   }
 
+  function handleRateButtonClick(event: MouseEvent<HTMLButtonElement>) {
+    changeRate(Number(event.currentTarget.dataset.rate) as PlaybackRate);
+  }
+
   function resetReading() {
     shouldContinuePlaybackRef.current = false;
     playbackSessionRef.current += 1;
@@ -724,8 +790,9 @@ export function ReaderApp() {
             <button
               key={rate}
               type="button"
+              data-rate={rate}
               className={preferences.rate === rate ? "active" : ""}
-              onClick={() => changeRate(rate)}
+              onClick={handleRateButtonClick}
             >
               {rate === 1 ? "Normal" : rate}
             </button>
@@ -737,6 +804,58 @@ export function ReaderApp() {
           Reiniciar
         </button>
       </>
+    );
+  }
+
+  function renderFocusControls() {
+    return (
+      <aside className="focus-control-dock" aria-label="Controles de lectura en pantalla completa">
+        <div className="focus-readout" aria-label="Avance de lectura">
+          <span>{formatRemainingTime(remainingSeconds)} restantes</span>
+          <strong>{percentage}%</strong>
+        </div>
+
+        <div className="focus-transport" aria-label="Reproducción">
+          <button type="button" onClick={() => seek(-10)} aria-label="Retroceder 10 segundos">
+            <ChevronLeft size={15} />
+            10 s
+          </button>
+          <button type="button" onClick={() => seek(-5)} aria-label="Retroceder 5 segundos">
+            <ChevronLeft size={15} />
+            5 s
+          </button>
+          <button className="focus-play-button" type="button" onClick={togglePlayback}>
+            {isPlaying ? <Pause size={18} /> : <Play size={18} />}
+            {isPlaying ? "Pausar" : "Leer"}
+          </button>
+          <button type="button" onClick={() => seek(5)} aria-label="Adelantar 5 segundos">
+            5 s
+            <ChevronRight size={15} />
+          </button>
+          <button type="button" onClick={() => seek(10)} aria-label="Adelantar 10 segundos">
+            10 s
+            <ChevronRight size={15} />
+          </button>
+        </div>
+
+        <div className="focus-speed" aria-label="Velocidad">
+          {([1, 0.75, 0.5] as PlaybackRate[]).map((rate) => (
+            <button
+              key={rate}
+              type="button"
+              data-rate={rate}
+              className={preferences.rate === rate ? "active" : ""}
+              onClick={handleRateButtonClick}
+            >
+              {rate === 1 ? "Normal" : rate}
+            </button>
+          ))}
+        </div>
+
+        <button className="focus-exit-action" type="button" onClick={toggleFocusMode}>
+          Salir
+        </button>
+      </aside>
     );
   }
 
@@ -990,11 +1109,7 @@ export function ReaderApp() {
         {renderPlayerControls()}
       </footer>
 
-      {preferences.readingMode === "focus" ? (
-        <button className="focus-exit" type="button" onClick={toggleFocusMode}>
-          Salir
-        </button>
-      ) : null}
+      {preferences.readingMode === "focus" && focusControlsVisible ? renderFocusControls() : null}
     </main>
   );
 }
