@@ -84,6 +84,7 @@ export function ReaderApp() {
   const playbackSessionRef = useRef(0);
   const shouldContinuePlaybackRef = useRef(false);
   const progressWordRef = useRef(0);
+  const boundarySeenRef = useRef(false);
 
   const clearProgressTimer = useCallback(() => {
     if (intervalRef.current) {
@@ -422,10 +423,13 @@ export function ReaderApp() {
   function startProgressTimer(startWord: number, endWord: number, rate = preferences.rate) {
     clearProgressTimer();
     progressWordRef.current = startWord;
-    const wordsPerSecond = (130 * rate) / 60;
-    const intervalMs = Math.max(420, Math.round(1000 / wordsPerSecond));
+    const fallbackStartsAt = window.Date.now() + 1800;
+    const wordsPerSecond = (105 * rate) / 60;
+    const intervalMs = Math.max(650, Math.round(1000 / wordsPerSecond));
 
     intervalRef.current = window.setInterval(() => {
+      if (boundarySeenRef.current || window.Date.now() < fallbackStartsAt) return;
+
       const nextWord = Math.min(progressWordRef.current + 1, endWord);
       if (!document || nextWord <= progressWordRef.current) {
         clearProgressTimer();
@@ -480,10 +484,12 @@ export function ReaderApp() {
     utterance.lang = voice.locale;
     utterance.rate = rate;
     utterance.pitch = voice.gender === "female" ? 1.04 : 0.92;
+    boundarySeenRef.current = false;
 
     utterance.onboundary = (event) => {
       if (playbackSessionRef.current !== activeSession) return;
       if (event.name && event.name !== "word") return;
+      boundarySeenRef.current = true;
       const spoken = textToSpeak.slice(0, event.charIndex);
       const nextWord = speechBaseWord + Math.max(0, countWords(spoken));
       updateProgress(Math.max(progressWordRef.current, nextWord));
