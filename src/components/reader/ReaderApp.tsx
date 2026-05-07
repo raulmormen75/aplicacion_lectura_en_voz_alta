@@ -42,7 +42,6 @@ import type {
   ReaderPreferences,
   StoredReaderState,
 } from "@/lib/reader/types";
-import { getVoiceById, getVoiceForLanguage, READER_VOICES } from "@/lib/reader/voices";
 
 type ProcessResponse = {
   document?: ReaderDocument;
@@ -51,7 +50,6 @@ type ProcessResponse = {
 
 type IntegrationsStatus = {
   googleReady: boolean;
-  azureReady: boolean;
   gptOssReady: boolean;
 };
 
@@ -69,12 +67,10 @@ export function ReaderApp() {
   const [googleDocUrl, setGoogleDocUrl] = useState("");
   const [isProcessing, setIsProcessing] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
-  const [voiceMenuOpen, setVoiceMenuOpen] = useState(false);
   const [statusMessage, setStatusMessage] = useState("Avance guardado en este dispositivo.");
   const [systemVoices, setSystemVoices] = useState<SpeechSynthesisVoice[]>([]);
   const [integrations, setIntegrations] = useState<IntegrationsStatus>({
     googleReady: false,
-    azureReady: false,
     gptOssReady: false,
   });
   const [isHydrated, setIsHydrated] = useState(false);
@@ -95,7 +91,6 @@ export function ReaderApp() {
 
   const document = state.document;
   const preferences = state.preferences;
-  const voice = getVoiceById(preferences.voiceId);
   const tokens = useMemo(
     () => tokenizeWords(document?.cleanText ?? ""),
     [document?.cleanText],
@@ -222,7 +217,6 @@ export function ReaderApp() {
     clearProgressTimer();
     setIsPlaying(false);
 
-    const recommendedVoice = getVoiceForLanguage(nextDocument.detectedLanguage);
     setState((current) => ({
       ...current,
       document: nextDocument,
@@ -237,13 +231,6 @@ export function ReaderApp() {
           current.preferences.rate,
         ),
         updatedAt: new Date().toISOString(),
-      },
-      preferences: {
-        ...current.preferences,
-        voiceId:
-          nextDocument.detectedLanguage === "mixed"
-            ? current.preferences.voiceId
-            : recommendedVoice.id,
       },
     }));
     setStatusMessage("Documento listo para escuchar.");
@@ -408,15 +395,18 @@ export function ReaderApp() {
     const availableVoices = systemVoices.length
       ? systemVoices
       : window.speechSynthesis.getVoices();
+    const documentLanguage = document?.detectedLanguage === "en" ? "en" : "es";
+    const localePrefix = documentLanguage === "en" ? "en" : "es";
+    const regionalLocale = documentLanguage === "en" ? "en-GB" : "es-MX";
 
     return (
       availableVoices.find(
         (item) =>
-          item.lang === voice.locale &&
-          /female|mujer|ximena|dalia|sonia|ada/i.test(item.name),
+          item.lang === regionalLocale &&
+          /female|mujer|woman|ximena|dalia|sonia|ada|sabina/i.test(item.name),
       ) ??
-      availableVoices.find((item) => item.lang === voice.locale) ??
-      availableVoices.find((item) => item.lang.startsWith(voice.locale.split("-")[0]))
+      availableVoices.find((item) => item.lang === regionalLocale) ??
+      availableVoices.find((item) => item.lang.startsWith(localePrefix))
     );
   }
 
@@ -479,11 +469,13 @@ export function ReaderApp() {
 
     const utterance = new SpeechSynthesisUtterance(textToSpeak);
     const preferredSystemVoice = getPreferredSystemVoice();
+    const utteranceLanguage =
+      preferredSystemVoice?.lang ?? (document.detectedLanguage === "en" ? "en-GB" : "es-MX");
 
     if (preferredSystemVoice) utterance.voice = preferredSystemVoice;
-    utterance.lang = voice.locale;
+    utterance.lang = utteranceLanguage;
     utterance.rate = rate;
-    utterance.pitch = voice.gender === "female" ? 1.04 : 0.92;
+    utterance.pitch = document.detectedLanguage === "en" ? 1 : 1.02;
     boundarySeenRef.current = false;
 
     utterance.onboundary = (event) => {
@@ -521,11 +513,7 @@ export function ReaderApp() {
     window.speechSynthesis.speak(utterance);
     startProgressTimer(speechBaseWord, chunkEndWord, rate);
     setIsPlaying(true);
-    setStatusMessage(
-      integrations.azureReady
-        ? "Lectura iniciada con voz configurada."
-        : "Lectura iniciada con voz del navegador. Azure se activará al configurar credenciales.",
-    );
+    setStatusMessage("Lectura iniciada con la voz disponible del navegador.");
   }
 
   function togglePlayback() {
@@ -641,6 +629,60 @@ export function ReaderApp() {
     } else if (globalThis.document.fullscreenElement) {
       await globalThis.document.exitFullscreen();
     }
+  }
+
+  function renderPlayerControls() {
+    return (
+      <>
+        <div className="progress-strip" aria-hidden="true">
+          <span style={{ width: `${percentage}%` }} />
+        </div>
+        <div className="time-pill">
+          <span>{formatRemainingTime(remainingSeconds)} restantes</span>
+          <strong>{percentage}%</strong>
+        </div>
+        <div className="transport">
+          <button type="button" onClick={() => seek(-10)} aria-label="Retroceder 10 segundos">
+            <ChevronLeft size={18} />
+            10 s
+          </button>
+          <button type="button" onClick={() => seek(-5)} aria-label="Retroceder 5 segundos">
+            <ChevronLeft size={18} />
+            5 s
+          </button>
+          <button className="play-button" type="button" onClick={togglePlayback}>
+            {isPlaying ? <Pause size={22} /> : <Play size={22} />}
+            {isPlaying ? "Pausar" : "Reproducir"}
+          </button>
+          <button type="button" onClick={() => seek(5)} aria-label="Adelantar 5 segundos">
+            5 s
+            <ChevronRight size={18} />
+          </button>
+          <button type="button" onClick={() => seek(10)} aria-label="Adelantar 10 segundos">
+            10 s
+            <ChevronRight size={18} />
+          </button>
+        </div>
+
+        <div className="speed-control" aria-label="Velocidad de lectura">
+          {([1, 0.75, 0.5] as PlaybackRate[]).map((rate) => (
+            <button
+              key={rate}
+              type="button"
+              className={preferences.rate === rate ? "active" : ""}
+              onClick={() => changeRate(rate)}
+            >
+              {rate === 1 ? "Normal" : rate}
+            </button>
+          ))}
+        </div>
+
+        <button className="reset-button" type="button" onClick={resetReading}>
+          <RotateCcw size={18} />
+          Reiniciar
+        </button>
+      </>
+    );
   }
 
   return (
@@ -765,6 +807,12 @@ export function ReaderApp() {
             ) : null}
           </div>
 
+          {document ? (
+            <div className="mobile-player-slot" aria-label="Controles de lectura">
+              <div className="player-dock mobile-player">{renderPlayerControls()}</div>
+            </div>
+          ) : null}
+
           <div className="reader-stage" aria-live="polite">
             {document ? (
               <article className="reader-document">
@@ -802,53 +850,6 @@ export function ReaderApp() {
         </section>
 
         <aside className="library-panel">
-          <div className="tool-group">
-            <p className="tool-title">Voz</p>
-            <div className="voice-picker">
-              <button
-                type="button"
-                className="voice-trigger"
-                aria-haspopup="listbox"
-                aria-expanded={voiceMenuOpen}
-                onClick={() => setVoiceMenuOpen((open) => !open)}
-              >
-                <span>
-                  <strong>{voice.name}</strong>
-                  <small>{voice.country}</small>
-                </span>
-                <span className="voice-flag" aria-hidden="true">
-                  {voice.flag}
-                </span>
-              </button>
-              {voiceMenuOpen ? (
-                <div className="voice-menu" role="listbox" aria-label="Seleccionar voz">
-                  {READER_VOICES.map((item) => (
-                    <button
-                      key={item.id}
-                      type="button"
-                      role="option"
-                      aria-selected={item.id === preferences.voiceId}
-                      className={item.id === preferences.voiceId ? "voice-option active" : "voice-option"}
-                      onClick={() => {
-                        updatePreferences({ voiceId: item.id });
-                        setVoiceMenuOpen(false);
-                      }}
-                    >
-                      <span>
-                        <strong>{item.name}</strong>
-                        <small>{item.country}</small>
-                      </span>
-                      <span className="voice-flag" aria-hidden="true">
-                        {item.flag}
-                      </span>
-                    </button>
-                  ))}
-                </div>
-              ) : null}
-            </div>
-            <span className="tool-note">{voice.description}</span>
-          </div>
-
           <div className="tool-group">
             <p className="tool-title">Modos</p>
             <button
@@ -897,54 +898,8 @@ export function ReaderApp() {
         </aside>
       </section>
 
-      <footer className="player-dock">
-        <div className="progress-strip" aria-hidden="true">
-          <span style={{ width: `${percentage}%` }} />
-        </div>
-        <div className="time-pill">
-          <span>{formatRemainingTime(remainingSeconds)} restantes</span>
-          <strong>{percentage}%</strong>
-        </div>
-        <div className="transport">
-          <button type="button" onClick={() => seek(-10)} aria-label="Retroceder 10 segundos">
-            <ChevronLeft size={18} />
-            10 s
-          </button>
-          <button type="button" onClick={() => seek(-5)} aria-label="Retroceder 5 segundos">
-            <ChevronLeft size={18} />
-            5 s
-          </button>
-          <button className="play-button" type="button" onClick={togglePlayback}>
-            {isPlaying ? <Pause size={22} /> : <Play size={22} />}
-            {isPlaying ? "Pausar" : "Reproducir"}
-          </button>
-          <button type="button" onClick={() => seek(5)} aria-label="Adelantar 5 segundos">
-            5 s
-            <ChevronRight size={18} />
-          </button>
-          <button type="button" onClick={() => seek(10)} aria-label="Adelantar 10 segundos">
-            10 s
-            <ChevronRight size={18} />
-          </button>
-        </div>
-
-        <div className="speed-control" aria-label="Velocidad de lectura">
-          {([1, 0.75, 0.5] as PlaybackRate[]).map((rate) => (
-            <button
-              key={rate}
-              type="button"
-              className={preferences.rate === rate ? "active" : ""}
-              onClick={() => changeRate(rate)}
-            >
-              {rate === 1 ? "Normal" : rate}
-            </button>
-          ))}
-        </div>
-
-        <button className="reset-button" type="button" onClick={resetReading}>
-          <RotateCcw size={18} />
-          Reiniciar
-        </button>
+      <footer className="player-dock desktop-player">
+        {renderPlayerControls()}
       </footer>
 
       {preferences.readingMode === "focus" ? (

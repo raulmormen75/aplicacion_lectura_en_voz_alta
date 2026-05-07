@@ -501,91 +501,6 @@ button:focus-visible {
   line-height: 1.45;
 }
 
-.voice-picker {
-  position: relative;
-}
-
-.voice-trigger,
-.voice-option {
-  display: flex;
-  width: 100%;
-  align-items: center;
-  justify-content: space-between;
-  gap: 14px;
-  border: 1px solid var(--border);
-  background: rgba(11, 11, 11, 0.54);
-  color: var(--ivory);
-  text-align: left;
-}
-
-.voice-trigger {
-  min-height: 58px;
-  border-radius: 16px;
-  padding: 8px 12px 8px 14px;
-}
-
-.voice-trigger span:first-child,
-.voice-option span:first-child {
-  display: grid;
-  min-width: 0;
-  gap: 2px;
-}
-
-.voice-trigger strong,
-.voice-option strong {
-  overflow: hidden;
-  font-size: 1rem;
-  font-weight: 820;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.voice-trigger small,
-.voice-option small {
-  color: var(--muted);
-  font-size: 0.76rem;
-  font-weight: 720;
-}
-
-.voice-flag {
-  display: grid;
-  width: 36px;
-  height: 30px;
-  flex: 0 0 auto;
-  place-items: center;
-  border-radius: 10px;
-  background: rgba(242, 242, 238, 0.08);
-  font-size: 1.28rem;
-  line-height: 1;
-}
-
-.voice-menu {
-  position: absolute;
-  top: calc(100% + 8px);
-  right: 0;
-  left: 0;
-  z-index: 50;
-  display: grid;
-  gap: 6px;
-  border: 1px solid rgba(198, 167, 94, 0.24);
-  border-radius: 18px;
-  background: rgba(16, 17, 19, 0.98);
-  box-shadow: 0 22px 60px rgba(0, 0, 0, 0.44);
-  padding: 8px;
-}
-
-.voice-option {
-  min-height: 54px;
-  border-radius: 14px;
-  padding: 8px 10px 8px 12px;
-}
-
-.voice-option:hover,
-.voice-option.active {
-  border-color: rgba(198, 167, 94, 0.54);
-  background: rgba(198, 167, 94, 0.14);
-}
-
 .mode-button {
   display: flex;
   min-height: 44px;
@@ -677,6 +592,10 @@ button:focus-visible {
 .has-document .player-dock {
   position: sticky;
   bottom: 16px;
+}
+
+.mobile-player-slot {
+  display: none;
 }
 
 .progress-strip {
@@ -932,6 +851,29 @@ button:focus-visible {
     grid-template-columns: 1fr;
   }
 
+  .desktop-player {
+    display: none;
+  }
+
+  .mobile-player-slot {
+    position: sticky;
+    top: 8px;
+    z-index: 35;
+    display: block;
+    margin-bottom: 12px;
+  }
+
+  .mobile-player-slot .player-dock {
+    position: relative;
+    right: auto;
+    bottom: auto;
+    left: auto;
+    max-width: none;
+    min-height: auto;
+    margin: 0;
+    padding: 12px;
+  }
+
   .player-dock {
     right: 10px;
     bottom: 10px;
@@ -974,6 +916,31 @@ button:focus-visible {
 @media (orientation: landscape) and (max-height: 560px) {
   .workspace-grid {
     grid-template-columns: 160px minmax(0, 1fr);
+  }
+
+  .desktop-player {
+    display: none;
+  }
+
+  .mobile-player-slot {
+    position: sticky;
+    top: 8px;
+    z-index: 35;
+    display: block;
+    margin-bottom: 10px;
+  }
+
+  .mobile-player-slot .player-dock {
+    position: relative;
+    right: auto;
+    bottom: auto;
+    left: auto;
+    grid-template-columns: 1fr;
+    max-width: none;
+    min-height: auto;
+    margin: 0;
+    padding: 10px;
+    border-radius: 20px;
   }
 
   .home-action {
