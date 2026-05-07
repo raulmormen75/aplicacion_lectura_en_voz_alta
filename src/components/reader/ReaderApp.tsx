@@ -685,6 +685,34 @@ export function ReaderApp() {
     );
   }
 
+  function renderModeControls(className = "") {
+    return (
+      <div className={`tool-group mode-controls ${className}`.trim()}>
+        <p className="tool-title">Modos</p>
+        <button
+          type="button"
+          className={preferences.theme === "warm-paper" ? "mode-button active" : "mode-button"}
+          onClick={() => updatePreferences({ theme: "warm-paper" })}
+        >
+          <SunMedium size={18} />
+          Papel cÃ¡lido
+        </button>
+        <button
+          type="button"
+          className={preferences.theme === "night" ? "mode-button active" : "mode-button"}
+          onClick={() => updatePreferences({ theme: "night" })}
+        >
+          <Moon size={18} />
+          Lectura nocturna
+        </button>
+        <button type="button" className="mode-button" onClick={toggleFocusMode}>
+          <ScanText size={18} />
+          Pantalla completa
+        </button>
+      </div>
+    );
+  }
+
   return (
     <main
       className={`reader-shell theme-${preferences.theme} mode-${preferences.readingMode} ${
@@ -808,9 +836,14 @@ export function ReaderApp() {
           </div>
 
           {document ? (
-            <div className="mobile-player-slot" aria-label="Controles de lectura">
-              <div className="player-dock mobile-player">{renderPlayerControls()}</div>
-            </div>
+            <>
+              <div className="mobile-player-slot" aria-label="Controles de lectura">
+                <div className="player-dock mobile-player">{renderPlayerControls()}</div>
+              </div>
+              <div className="mobile-modes-slot" aria-label="Modos de lectura">
+                {renderModeControls("mobile-mode-controls")}
+              </div>
+            </>
           ) : null}
 
           <div className="reader-stage" aria-live="polite">
@@ -850,7 +883,7 @@ export function ReaderApp() {
         </section>
 
         <aside className="library-panel">
-          <div className="tool-group">
+          <div className="tool-group mode-controls desktop-mode-controls">
             <p className="tool-title">Modos</p>
             <button
               type="button"

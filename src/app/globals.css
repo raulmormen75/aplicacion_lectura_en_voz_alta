@@ -594,7 +594,8 @@ button:focus-visible {
   bottom: 16px;
 }
 
-.mobile-player-slot {
+.mobile-player-slot,
+.mobile-modes-slot {
   display: none;
 }
 
@@ -692,6 +693,8 @@ button:focus-visible {
 .mode-focus .home-panel,
 .mode-focus .library-panel,
 .mode-focus .import-panel,
+.mode-focus .mobile-player-slot,
+.mode-focus .mobile-modes-slot,
 .mode-focus .player-dock {
   pointer-events: none;
   opacity: 0;
@@ -855,12 +858,31 @@ button:focus-visible {
     display: none;
   }
 
+  .has-document .desktop-mode-controls {
+    display: none;
+  }
+
   .mobile-player-slot {
     position: sticky;
     top: 8px;
     z-index: 35;
     display: block;
     margin-bottom: 12px;
+  }
+
+  .mobile-modes-slot {
+    display: block;
+    margin-bottom: 12px;
+  }
+
+  .mobile-mode-controls {
+    gap: 8px;
+    border-radius: 20px;
+    padding: 12px;
+  }
+
+  .mobile-mode-controls .mode-button {
+    min-height: 42px;
   }
 
   .mobile-player-slot .player-dock {
@@ -922,12 +944,31 @@ button:focus-visible {
     display: none;
   }
 
+  .has-document .desktop-mode-controls {
+    display: none;
+  }
+
   .mobile-player-slot {
     position: sticky;
     top: 8px;
     z-index: 35;
     display: block;
     margin-bottom: 10px;
+  }
+
+  .mobile-modes-slot {
+    display: block;
+    margin-bottom: 10px;
+  }
+
+  .mobile-mode-controls {
+    gap: 8px;
+    border-radius: 20px;
+    padding: 10px;
+  }
+
+  .mobile-mode-controls .mode-button {
+    min-height: 40px;
   }
 
   .mobile-player-slot .player-dock {
