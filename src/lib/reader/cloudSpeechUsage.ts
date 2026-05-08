@@ -2,13 +2,12 @@ import type { CloudSpeechProvider } from "./types";
 
 const STORAGE_KEY = "lector-documental-raul:cloud-speech-usage:v1";
 export const DEFAULT_AZURE_TTS_MONTHLY_LIMIT = 500_000;
-export const DEFAULT_GOOGLE_TTS_MONTHLY_LIMIT = 1_000_000;
 
 export type CloudSpeechUsage = {
   monthKey: string;
   azureCharacters: number;
-  googleCharacters: number;
   updatedAt: string;
+  source?: "local" | "server";
 };
 
 export function getCurrentMonthKey(date = new Date()) {
@@ -41,8 +40,8 @@ export function loadCloudSpeechUsage(): CloudSpeechUsage {
     return {
       monthKey: emptyUsage.monthKey,
       azureCharacters: Number(parsed.azureCharacters ?? 0),
-      googleCharacters: Number(parsed.googleCharacters ?? 0),
       updatedAt: parsed.updatedAt ?? emptyUsage.updatedAt,
+      source: "local",
     };
   } catch {
     return emptyUsage;
@@ -55,16 +54,14 @@ export function saveCloudSpeechUsage(usage: CloudSpeechUsage) {
 }
 
 export function addCloudSpeechUsage(provider: CloudSpeechProvider, characters: number) {
-  if (provider !== "azure" && provider !== "google") return loadCloudSpeechUsage();
+  if (provider !== "azure") return loadCloudSpeechUsage();
 
   const usage = loadCloudSpeechUsage();
   const nextUsage: CloudSpeechUsage = {
     ...usage,
-    azureCharacters:
-      provider === "azure" ? usage.azureCharacters + characters : usage.azureCharacters,
-    googleCharacters:
-      provider === "google" ? usage.googleCharacters + characters : usage.googleCharacters,
+    azureCharacters: usage.azureCharacters + characters,
     updatedAt: new Date().toISOString(),
+    source: "local",
   };
 
   saveCloudSpeechUsage(nextUsage);
@@ -75,7 +72,7 @@ function createEmptyUsage(): CloudSpeechUsage {
   return {
     monthKey: getCurrentMonthKey(),
     azureCharacters: 0,
-    googleCharacters: 0,
     updatedAt: new Date(0).toISOString(),
+    source: "local",
   };
 }

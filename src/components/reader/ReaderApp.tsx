@@ -36,7 +36,6 @@ import {
 import {
   addCloudSpeechUsage,
   DEFAULT_AZURE_TTS_MONTHLY_LIMIT,
-  DEFAULT_GOOGLE_TTS_MONTHLY_LIMIT,
   getCloudSpeechUsageWindow,
   loadCloudSpeechUsage,
   type CloudSpeechUsage,
@@ -60,7 +59,6 @@ type IntegrationsStatus = {
   ttsLimits?: {
     billingPeriod: "calendar-month";
     azureMonthlyCharacters: number;
-    googleMonthlyCharacters: number;
   };
 };
 
@@ -71,6 +69,8 @@ type SpeechResponse = {
   audioBase64?: string;
   mimeType?: string;
   characterCount?: number;
+  usage?: CloudSpeechUsage;
+  usageSource?: "local" | "server";
 };
 
 const SAMPLE_TEXT =
@@ -205,26 +205,21 @@ export function ReaderApp() {
   const monthlyVoiceUsage = cloudUsage ?? {
     monthKey: usageWindow.monthKey,
     azureCharacters: 0,
-    googleCharacters: 0,
     updatedAt: new Date(0).toISOString(),
+    source: "local" as const,
   };
   const azureMonthlyLimit =
     integrations.ttsLimits?.azureMonthlyCharacters ?? DEFAULT_AZURE_TTS_MONTHLY_LIMIT;
-  const googleMonthlyLimit =
-    integrations.ttsLimits?.googleMonthlyCharacters ?? DEFAULT_GOOGLE_TTS_MONTHLY_LIMIT;
   const azureUsagePercent = calculateUsagePercent(
     monthlyVoiceUsage.azureCharacters,
     azureMonthlyLimit,
   );
-  const googleUsagePercent = calculateUsagePercent(
-    monthlyVoiceUsage.googleCharacters,
-    googleMonthlyLimit,
-  );
   const nextUsageResetLabel = formatUsageResetDate(usageWindow.endExclusive);
   const usageMonthLabel = formatUsageMonth(usageWindow.start);
+  const usagePeriodLabel = `${formatUsageBoundaryDate(usageWindow.start)}-${formatUsageBoundaryDate(
+    usageWindow.endExclusive,
+  )}`;
   const hasReachedAzureLimit = monthlyVoiceUsage.azureCharacters >= azureMonthlyLimit;
-  const hasReachedGoogleLimit = monthlyVoiceUsage.googleCharacters >= googleMonthlyLimit;
-  const allCloudLimitsReached = hasReachedAzureLimit && hasReachedGoogleLimit;
 
   useEffect(() => {
     window.queueMicrotask(() => {
@@ -240,6 +235,13 @@ export function ReaderApp() {
     fetch("/api/integrations/status")
       .then((response) => response.json())
       .then((data: IntegrationsStatus) => setIntegrations(data))
+      .catch(() => undefined);
+
+    fetch("/api/speech/usage")
+      .then((response) => response.json())
+      .then((data: { configured: boolean; usage?: CloudSpeechUsage }) => {
+        if (data.configured && data.usage) setCloudUsage(data.usage);
+      })
       .catch(() => undefined);
 
     if ("serviceWorker" in navigator) {
@@ -278,6 +280,12 @@ export function ReaderApp() {
     const refreshUsageWindow = () => {
       setUsageNow(new Date());
       setCloudUsage(loadCloudSpeechUsage());
+      fetch("/api/speech/usage")
+        .then((response) => response.json())
+        .then((data: { configured: boolean; usage?: CloudSpeechUsage }) => {
+          if (data.configured && data.usage) setCloudUsage(data.usage);
+        })
+        .catch(() => undefined);
     };
     const usageTimer = window.setInterval(refreshUsageWindow, 30 * 60 * 1000);
 
@@ -626,8 +634,8 @@ export function ReaderApp() {
     updateProgress(speechBaseWord);
     setIsPlaying(true);
     setStatusMessage(
-      allCloudLimitsReached
-        ? "Se alcanzó el límite mensual configurado de voces cloud. Se usará el navegador."
+      hasReachedAzureLimit
+        ? "Se alcanzó el límite mensual configurado de Azure. Se usará el navegador."
         : "Preparando voz natural.",
     );
 
@@ -647,7 +655,11 @@ export function ReaderApp() {
       if (playbackSessionRef.current !== activeSession) return;
 
       if (data.mode === "cloud-audio" && data.audioBase64) {
-        setCloudUsage(addCloudSpeechUsage(data.provider, data.characterCount ?? textToSpeak.length));
+        if (data.usageSource === "server" && data.usage) {
+          setCloudUsage(data.usage);
+        } else {
+          setCloudUsage(addCloudSpeechUsage(data.provider, data.characterCount ?? textToSpeak.length));
+        }
         playCloudAudio({
           audioBase64: data.audioBase64,
           mimeType: data.mimeType ?? "audio/mpeg",
@@ -832,7 +844,6 @@ export function ReaderApp() {
 
   function providerLabel(provider: CloudSpeechProvider) {
     if (provider === "azure") return "Azure";
-    if (provider === "google") return "Google Cloud";
     return "navegador";
   }
 
@@ -1103,16 +1114,16 @@ export function ReaderApp() {
     return (
       <div
         className={variant === "focus" ? "voice-usage-meter focus-usage-meter" : "voice-usage-meter"}
-        title={`Periodo mensual: ${usageMonthLabel}. Reinicia ${nextUsageResetLabel}.`}
+        title={`Periodo mensual: ${usageMonthLabel}. Inicia ${formatUsageResetDate(
+          usageWindow.start,
+        )} y termina ${nextUsageResetLabel}.`}
       >
-        <span>Voces gratis</span>
+        <span>Azure gratis</span>
         <strong className={hasReachedAzureLimit ? "limit-reached" : ""}>
-          Azure {azureUsagePercent}%
+          {azureUsagePercent}%
         </strong>
-        <strong className={hasReachedGoogleLimit ? "limit-reached" : ""}>
-          Google {googleUsagePercent}%
-        </strong>
-        <small>reinicia {nextUsageResetLabel}</small>
+        <small>{usagePeriodLabel}</small>
+        {monthlyVoiceUsage.source === "server" ? <small>global</small> : null}
       </div>
     );
   }
@@ -1389,4 +1400,13 @@ function formatUsageResetDate(date: Date) {
     day: "numeric",
     month: "short",
   }).format(date);
+}
+
+function formatUsageBoundaryDate(date: Date) {
+  return new Intl.DateTimeFormat("es-MX", {
+    day: "numeric",
+    month: "short",
+  })
+    .format(date)
+    .replace(".", "");
 }
