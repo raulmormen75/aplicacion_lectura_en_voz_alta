@@ -8,15 +8,19 @@ export type PlaybackRate = 1 | 0.75 | 0.5;
 
 export type OcrAction = "none" | "clean" | "reconstruct";
 
+export type CloudSpeechProvider = "azure" | "google" | "browser";
+
 export type ReaderVoice = {
   id: string;
   name: string;
   country: "México" | "Gran Bretaña";
   flag: "🇲🇽" | "🇬🇧";
   locale: "es-MX" | "en-GB";
+  googleLocale: "es-US" | "en-GB";
   gender: "female" | "male";
   maturity: "young" | "mature";
   azureName: string;
+  googleName: string;
   description: string;
 };
 

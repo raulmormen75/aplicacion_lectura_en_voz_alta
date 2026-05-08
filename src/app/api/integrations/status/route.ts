@@ -1,9 +1,31 @@
 import { NextResponse } from "next/server";
+import {
+  DEFAULT_AZURE_TTS_MONTHLY_LIMIT,
+  DEFAULT_GOOGLE_TTS_MONTHLY_LIMIT,
+} from "@/lib/reader/cloudSpeechUsage";
 
 export function GET() {
   return NextResponse.json({
-    googleReady: Boolean(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET),
+    googleReady: Boolean(
+      process.env.GOOGLE_TTS_SERVICE_ACCOUNT_JSON ?? process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON,
+    ),
     azureReady: Boolean(process.env.AZURE_SPEECH_KEY && process.env.AZURE_SPEECH_REGION),
     gptOssReady: Boolean(process.env.GPT_OSS_ENDPOINT),
+    ttsLimits: {
+      billingPeriod: "calendar-month",
+      azureMonthlyCharacters: readLimit(
+        "AZURE_TTS_MONTHLY_CHARACTER_LIMIT",
+        DEFAULT_AZURE_TTS_MONTHLY_LIMIT,
+      ),
+      googleMonthlyCharacters: readLimit(
+        "GOOGLE_TTS_MONTHLY_CHARACTER_LIMIT",
+        DEFAULT_GOOGLE_TTS_MONTHLY_LIMIT,
+      ),
+    },
   });
+}
+
+function readLimit(envName: string, fallback: number) {
+  const value = Number(process.env[envName]);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
 }

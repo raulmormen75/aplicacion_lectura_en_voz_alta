@@ -7,9 +7,11 @@ export const READER_VOICES: ReaderVoice[] = [
     country: "México",
     flag: "🇲🇽",
     locale: "es-MX",
+    googleLocale: "es-US",
     gender: "female",
     maturity: "young",
     azureName: "es-MX-Ximena:DragonHDLatestNeural",
+    googleName: "es-US-Chirp3-HD-Aoede",
     description: "Mujer mexicana joven, clara y cercana para divulgación científica.",
   },
   {
@@ -18,9 +20,11 @@ export const READER_VOICES: ReaderVoice[] = [
     country: "México",
     flag: "🇲🇽",
     locale: "es-MX",
+    googleLocale: "es-US",
     gender: "female",
     maturity: "young",
     azureName: "es-MX-DaliaNeural",
+    googleName: "es-US-Neural2-A",
     description: "Mujer mexicana joven, estable y natural para lectura documental.",
   },
   {
@@ -29,9 +33,11 @@ export const READER_VOICES: ReaderVoice[] = [
     country: "México",
     flag: "🇲🇽",
     locale: "es-MX",
+    googleLocale: "es-US",
     gender: "male",
     maturity: "mature",
     azureName: "es-MX-Tristan:DragonHDLatestNeural",
+    googleName: "es-US-Chirp3-HD-Charon",
     description: "Hombre mexicano maduro, sereno y explicativo.",
   },
   {
@@ -40,9 +46,11 @@ export const READER_VOICES: ReaderVoice[] = [
     country: "México",
     flag: "🇲🇽",
     locale: "es-MX",
+    googleLocale: "es-US",
     gender: "male",
     maturity: "mature",
     azureName: "es-MX-JorgeNeural",
+    googleName: "es-US-Neural2-B",
     description: "Hombre mexicano maduro, sobrio y adecuado para textos largos.",
   },
   {
@@ -51,9 +59,11 @@ export const READER_VOICES: ReaderVoice[] = [
     country: "Gran Bretaña",
     flag: "🇬🇧",
     locale: "en-GB",
+    googleLocale: "en-GB",
     gender: "female",
     maturity: "young",
     azureName: "en-GB-Ada:DragonHDLatestNeural",
+    googleName: "en-GB-Chirp3-HD-Sulafat",
     description: "Mujer británica joven para contenido en inglés.",
   },
   {
@@ -62,14 +72,16 @@ export const READER_VOICES: ReaderVoice[] = [
     country: "Gran Bretaña",
     flag: "🇬🇧",
     locale: "en-GB",
+    googleLocale: "en-GB",
     gender: "male",
     maturity: "mature",
     azureName: "en-GB-Ollie:DragonHDLatestNeural",
+    googleName: "en-GB-Chirp3-HD-Umbriel",
     description: "Hombre británico maduro para lectura científica en inglés.",
   },
 ];
 
-export const DEFAULT_VOICE_ID = "ximena-mx";
+export const DEFAULT_VOICE_ID = "dalia-mx";
 
 export function getVoiceById(voiceId: string) {
   return READER_VOICES.find((voice) => voice.id === voiceId) ?? READER_VOICES[0];

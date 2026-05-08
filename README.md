@@ -1,36 +1,50 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Lector Documental Raul
 
-## Getting Started
+PWA en Next.js para convertir PDF, Word, texto pegado y sitios web en lectura en voz alta con avance guardado, controles de reproducción y resaltado visual.
 
-First, run the development server:
+## Desarrollo local
 
 ```bash
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Abre `http://localhost:3000`.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Voces cloud
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+La app intenta sintetizar cada fragmento en este orden:
 
-## Learn More
+1. Azure Speech.
+2. Google Cloud Text-to-Speech, cuando Azure no está configurado, falla o supera el presupuesto mensual configurado.
+3. Voz del navegador, solo como respaldo final.
 
-To learn more about Next.js, take a look at the following resources:
+El cambio entre Azure y Google se calcula por caracteres sintetizados en el mes calendario. La pantalla muestra un contador pequeño de uso gratuito: porcentaje usado en Azure, porcentaje usado en Google y la fecha en que reinicia el periodo mensual.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+En esta versión personal, el contador vive en `localStorage` del navegador; si se necesita un conteo global entre dispositivos, hay que agregar una base de datos o KV en servidor.
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## Variables de entorno
 
-## Deploy on Vercel
+En Vercel agrega estas variables en `Production and Preview`.
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+```env
+AZURE_SPEECH_KEY=
+AZURE_SPEECH_REGION=
+GOOGLE_TTS_SERVICE_ACCOUNT_JSON=
+AZURE_TTS_MONTHLY_CHARACTER_LIMIT=500000
+GOOGLE_TTS_MONTHLY_CHARACTER_LIMIT=1000000
+```
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Notas:
+
+- `AZURE_SPEECH_REGION` es la región del recurso, por ejemplo `eastus`, `westus2` o `mexicocentral` si tu cuenta la ofrece.
+- `GOOGLE_TTS_SERVICE_ACCOUNT_JSON` puede ser el JSON completo de la cuenta de servicio o el mismo JSON convertido a base64.
+- Los límites mensuales son configurables para no depender de valores fijos dentro del código.
+- La voz principal en español usa Azure `es-MX-DaliaNeural` para cuidar el nivel gratuito. Google se usa como respaldo con una voz natural `es-US`, porque Google Cloud no siempre ofrece una voz `es-MX` natural equivalente en todos los proyectos.
+
+## Comandos de verificación
+
+```bash
+npm run lint
+npm run build
+```

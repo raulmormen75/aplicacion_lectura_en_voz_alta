@@ -33,7 +33,17 @@ import {
   loadReaderState,
   saveReaderState,
 } from "@/lib/reader/storage";
+import {
+  addCloudSpeechUsage,
+  DEFAULT_AZURE_TTS_MONTHLY_LIMIT,
+  DEFAULT_GOOGLE_TTS_MONTHLY_LIMIT,
+  getCloudSpeechUsageWindow,
+  loadCloudSpeechUsage,
+  type CloudSpeechUsage,
+} from "@/lib/reader/cloudSpeechUsage";
+import { getVoiceForLanguage } from "@/lib/reader/voices";
 import type {
+  CloudSpeechProvider,
   PlaybackRate,
   ReaderDocument,
   ReaderPreferences,
@@ -47,6 +57,20 @@ type ProcessResponse = {
 
 type IntegrationsStatus = {
   gptOssReady: boolean;
+  ttsLimits?: {
+    billingPeriod: "calendar-month";
+    azureMonthlyCharacters: number;
+    googleMonthlyCharacters: number;
+  };
+};
+
+type SpeechResponse = {
+  mode: "cloud-audio" | "browser-fallback";
+  provider: CloudSpeechProvider;
+  message?: string;
+  audioBase64?: string;
+  mimeType?: string;
+  characterCount?: number;
 };
 
 const SAMPLE_TEXT =
@@ -68,8 +92,17 @@ export function ReaderApp() {
   const [integrations, setIntegrations] = useState<IntegrationsStatus>({
     gptOssReady: false,
   });
+  const [cloudUsage, setCloudUsage] = useState<CloudSpeechUsage | null>(null);
+  const [usageNow, setUsageNow] = useState(() => new Date());
   const [isHydrated, setIsHydrated] = useState(false);
   const utteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const audioUrlRef = useRef<string | null>(null);
+  const activeSegmentRef = useRef<{
+    startWord: number;
+    endWord: number;
+    rate: PlaybackRate;
+  } | null>(null);
   const intervalRef = useRef<number | null>(null);
   const activeWordRef = useRef<HTMLSpanElement | null>(null);
   const playbackSessionRef = useRef(0);
@@ -86,6 +119,32 @@ export function ReaderApp() {
       intervalRef.current = null;
     }
   }, []);
+
+  const clearCloudAudio = useCallback(() => {
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current.removeAttribute("src");
+      audioRef.current.load();
+      audioRef.current = null;
+    }
+
+    if (audioUrlRef.current) {
+      URL.revokeObjectURL(audioUrlRef.current);
+      audioUrlRef.current = null;
+    }
+  }, []);
+
+  const stopPlayback = useCallback(
+    (advanceSession = true) => {
+      shouldContinuePlaybackRef.current = false;
+      if (advanceSession) playbackSessionRef.current += 1;
+      window.speechSynthesis?.cancel();
+      clearCloudAudio();
+      clearProgressTimer();
+      activeSegmentRef.current = null;
+    },
+    [clearCloudAudio, clearProgressTimer],
+  );
 
   const tokens = useMemo(
     () => tokenizeWords(document?.cleanText ?? ""),
@@ -142,10 +201,35 @@ export function ReaderApp() {
     currentWord,
     preferences.rate,
   );
+  const usageWindow = useMemo(() => getCloudSpeechUsageWindow(usageNow), [usageNow]);
+  const monthlyVoiceUsage = cloudUsage ?? {
+    monthKey: usageWindow.monthKey,
+    azureCharacters: 0,
+    googleCharacters: 0,
+    updatedAt: new Date(0).toISOString(),
+  };
+  const azureMonthlyLimit =
+    integrations.ttsLimits?.azureMonthlyCharacters ?? DEFAULT_AZURE_TTS_MONTHLY_LIMIT;
+  const googleMonthlyLimit =
+    integrations.ttsLimits?.googleMonthlyCharacters ?? DEFAULT_GOOGLE_TTS_MONTHLY_LIMIT;
+  const azureUsagePercent = calculateUsagePercent(
+    monthlyVoiceUsage.azureCharacters,
+    azureMonthlyLimit,
+  );
+  const googleUsagePercent = calculateUsagePercent(
+    monthlyVoiceUsage.googleCharacters,
+    googleMonthlyLimit,
+  );
+  const nextUsageResetLabel = formatUsageResetDate(usageWindow.endExclusive);
+  const usageMonthLabel = formatUsageMonth(usageWindow.start);
+  const hasReachedAzureLimit = monthlyVoiceUsage.azureCharacters >= azureMonthlyLimit;
+  const hasReachedGoogleLimit = monthlyVoiceUsage.googleCharacters >= googleMonthlyLimit;
+  const allCloudLimitsReached = hasReachedAzureLimit && hasReachedGoogleLimit;
 
   useEffect(() => {
     window.queueMicrotask(() => {
       setState(loadReaderState());
+      setCloudUsage(loadCloudSpeechUsage());
       setIsHydrated(true);
     });
 
@@ -163,12 +247,10 @@ export function ReaderApp() {
     }
 
     return () => {
-      shouldContinuePlaybackRef.current = false;
       window.speechSynthesis?.removeEventListener?.("voiceschanged", refreshVoices);
-      window.speechSynthesis?.cancel();
-      clearProgressTimer();
+      stopPlayback();
     };
-  }, [clearProgressTimer]);
+  }, [stopPlayback]);
 
   useEffect(() => {
     let revealTimer: number | null = null;
@@ -189,6 +271,18 @@ export function ReaderApp() {
   useEffect(() => {
     progressWordRef.current = currentWord;
   }, [currentWord]);
+
+  useEffect(() => {
+    if (!isHydrated) return;
+
+    const refreshUsageWindow = () => {
+      setUsageNow(new Date());
+      setCloudUsage(loadCloudSpeechUsage());
+    };
+    const usageTimer = window.setInterval(refreshUsageWindow, 30 * 60 * 1000);
+
+    return () => window.clearInterval(usageTimer);
+  }, [isHydrated]);
 
   useEffect(() => {
     const activeWord = activeWordRef.current;
@@ -277,10 +371,7 @@ export function ReaderApp() {
   }
 
   function setDocument(nextDocument: ReaderDocument) {
-    shouldContinuePlaybackRef.current = false;
-    playbackSessionRef.current += 1;
-    window.speechSynthesis.cancel();
-    clearProgressTimer();
+    stopPlayback();
     setIsPlaying(false);
 
     setState((current) => ({
@@ -458,6 +549,28 @@ export function ReaderApp() {
     );
   }
 
+  function getSpeechWindow(fromWord: number) {
+    if (!document) return null;
+
+    const safeFromWord = Math.max(0, Math.min(fromWord, document.wordCount));
+    const chunk = getChunkForWord(safeFromWord);
+    if (!chunk || safeFromWord >= document.wordCount) return null;
+
+    const chunkTokens = tokenizeWords(chunk.cleanText);
+    const localStartWord = Math.max(0, safeFromWord - chunk.startWord);
+    const startChar = chunkTokens[localStartWord]?.start ?? 0;
+    const textToSpeak = chunk.cleanText.slice(startChar).trim();
+    const speechBaseWord = chunk.startWord + localStartWord;
+    const chunkEndWord = Math.min(chunk.startWord + chunk.wordCount, document.wordCount);
+
+    return {
+      chunk,
+      textToSpeak,
+      speechBaseWord,
+      chunkEndWord,
+    };
+  }
+
   function startProgressTimer(startWord: number, endWord: number, rate = preferences.rate) {
     clearProgressTimer();
     progressWordRef.current = startWord;
@@ -482,7 +595,7 @@ export function ReaderApp() {
     }, intervalMs);
   }
 
-  function startSpeech(fromWord = currentWord, sessionId?: number, rate = preferences.rate) {
+  async function startSpeech(fromWord = currentWord, sessionId?: number, rate = preferences.rate) {
     if (!document) return;
 
     const activeSession = sessionId ?? playbackSessionRef.current + 1;
@@ -490,58 +603,200 @@ export function ReaderApp() {
     shouldContinuePlaybackRef.current = true;
 
     if (!sessionId) {
-      window.speechSynthesis.cancel();
+      window.speechSynthesis?.cancel();
+      clearCloudAudio();
       clearProgressTimer();
     }
 
-    const safeFromWord = Math.max(0, Math.min(fromWord, document.wordCount));
-    const chunk = getChunkForWord(safeFromWord);
-    if (!chunk || safeFromWord >= document.wordCount) {
+    const speechWindow = getSpeechWindow(fromWord);
+    if (!speechWindow) {
       clearProgressTimer();
       setIsPlaying(false);
       setStatusMessage("Lectura terminada. Tu avance quedó guardado.");
       return;
     }
 
-    const chunkTokens = tokenizeWords(chunk.cleanText);
-    const localStartWord = Math.max(0, safeFromWord - chunk.startWord);
-    const startChar = chunkTokens[localStartWord]?.start ?? 0;
-    const textToSpeak = chunk.cleanText.slice(startChar).trim();
-    const speechBaseWord = chunk.startWord + localStartWord;
-    const chunkEndWord = Math.min(chunk.startWord + chunk.wordCount, document.wordCount);
+    const { chunk, textToSpeak, speechBaseWord, chunkEndWord } = speechWindow;
 
     if (!textToSpeak) {
-      startSpeech(chunkEndWord, activeSession, rate);
+      void startSpeech(chunkEndWord, activeSession, rate);
       return;
     }
 
-    const utterance = new SpeechSynthesisUtterance(textToSpeak);
+    updateProgress(speechBaseWord);
+    setIsPlaying(true);
+    setStatusMessage(
+      allCloudLimitsReached
+        ? "Se alcanzó el límite mensual configurado de voces cloud. Se usará el navegador."
+        : "Preparando voz natural.",
+    );
+
+    try {
+      const response = await fetch("/api/speech/synthesize", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          text: textToSpeak,
+          voiceId: getVoiceForLanguage(chunk.language).id,
+          rate,
+          usage: loadCloudSpeechUsage(),
+        }),
+      });
+      const data = (await response.json()) as SpeechResponse;
+
+      if (playbackSessionRef.current !== activeSession) return;
+
+      if (data.mode === "cloud-audio" && data.audioBase64) {
+        setCloudUsage(addCloudSpeechUsage(data.provider, data.characterCount ?? textToSpeak.length));
+        playCloudAudio({
+          audioBase64: data.audioBase64,
+          mimeType: data.mimeType ?? "audio/mpeg",
+          provider: data.provider,
+          activeSession,
+          rate,
+          speechBaseWord,
+          chunkEndWord,
+          textToSpeak,
+        });
+        return;
+      }
+
+      startBrowserSpeech({
+        textToSpeak,
+        speechBaseWord,
+        chunkEndWord,
+        activeSession,
+        rate,
+        statusMessage: data.message,
+      });
+    } catch {
+      if (playbackSessionRef.current !== activeSession) return;
+      startBrowserSpeech({
+        textToSpeak,
+        speechBaseWord,
+        chunkEndWord,
+        activeSession,
+        rate,
+        statusMessage: "No se pudo conectar con la voz cloud. Se usará la voz del navegador.",
+      });
+    }
+  }
+
+  function playCloudAudio(params: {
+    audioBase64: string;
+    mimeType: string;
+    provider: CloudSpeechProvider;
+    activeSession: number;
+    rate: PlaybackRate;
+    speechBaseWord: number;
+    chunkEndWord: number;
+    textToSpeak: string;
+  }) {
+    clearCloudAudio();
+    boundarySeenRef.current = false;
+    const audioBlob = new Blob([decodeBase64Audio(params.audioBase64)], {
+      type: params.mimeType,
+    });
+    const audioUrl = URL.createObjectURL(audioBlob);
+    const audio = new Audio(audioUrl);
+    audio.playbackRate = params.rate;
+    audioRef.current = audio;
+    audioUrlRef.current = audioUrl;
+    activeSegmentRef.current = {
+      startWord: params.speechBaseWord,
+      endWord: params.chunkEndWord,
+      rate: params.rate,
+    };
+
+    audio.ontimeupdate = () => {
+      if (playbackSessionRef.current !== params.activeSession) return;
+      if (!Number.isFinite(audio.duration) || audio.duration <= 0) return;
+
+      const segmentWords = Math.max(params.chunkEndWord - params.speechBaseWord, 1);
+      const progressRatio = Math.min(1, Math.max(0, audio.currentTime / audio.duration));
+      const nextWord = params.speechBaseWord + Math.floor(segmentWords * progressRatio);
+      updateProgress(Math.max(progressWordRef.current, nextWord));
+    };
+
+    audio.onended = () => {
+      clearProgressTimer();
+      if (playbackSessionRef.current !== params.activeSession) return;
+
+      updateProgress(Math.max(progressWordRef.current, params.chunkEndWord));
+      clearCloudAudio();
+
+      if (shouldContinuePlaybackRef.current && document && params.chunkEndWord < document.wordCount) {
+        void startSpeech(params.chunkEndWord, params.activeSession, params.rate);
+        return;
+      }
+
+      setIsPlaying(false);
+      setStatusMessage("Lectura terminada. Tu avance quedó guardado.");
+    };
+
+    audio.onerror = () => {
+      if (playbackSessionRef.current !== params.activeSession) return;
+      clearCloudAudio();
+      startBrowserSpeech(params);
+    };
+
+    updateProgress(params.speechBaseWord);
+    void audio
+      .play()
+      .then(() => {
+        if (playbackSessionRef.current !== params.activeSession) return;
+        startProgressTimer(params.speechBaseWord, params.chunkEndWord, params.rate);
+        setIsPlaying(true);
+        setStatusMessage(`Lectura iniciada con voz natural de ${providerLabel(params.provider)}.`);
+      })
+      .catch(() => {
+        if (playbackSessionRef.current !== params.activeSession) return;
+        clearCloudAudio();
+        startBrowserSpeech(params);
+      });
+  }
+
+  function startBrowserSpeech(params: {
+    textToSpeak: string;
+    speechBaseWord: number;
+    chunkEndWord: number;
+    activeSession: number;
+    rate: PlaybackRate;
+    statusMessage?: string;
+  }) {
+    clearCloudAudio();
+    const utterance = new SpeechSynthesisUtterance(params.textToSpeak);
     const preferredSystemVoice = getPreferredSystemVoice();
     const utteranceLanguage =
-      preferredSystemVoice?.lang ?? (document.detectedLanguage === "en" ? "en-GB" : "es-MX");
+      preferredSystemVoice?.lang ?? (document?.detectedLanguage === "en" ? "en-GB" : "es-MX");
 
     if (preferredSystemVoice) utterance.voice = preferredSystemVoice;
     utterance.lang = utteranceLanguage;
-    utterance.rate = rate;
-    utterance.pitch = document.detectedLanguage === "en" ? 1 : 1.02;
+    utterance.rate = params.rate;
+    utterance.pitch = document?.detectedLanguage === "en" ? 1 : 1.02;
     boundarySeenRef.current = false;
+    activeSegmentRef.current = {
+      startWord: params.speechBaseWord,
+      endWord: params.chunkEndWord,
+      rate: params.rate,
+    };
 
     utterance.onboundary = (event) => {
-      if (playbackSessionRef.current !== activeSession) return;
+      if (playbackSessionRef.current !== params.activeSession) return;
       if (event.name && event.name !== "word") return;
       boundarySeenRef.current = true;
-      const spoken = textToSpeak.slice(0, event.charIndex);
-      const nextWord = speechBaseWord + Math.max(0, countWords(spoken));
+      const spoken = params.textToSpeak.slice(0, event.charIndex);
+      const nextWord = params.speechBaseWord + Math.max(0, countWords(spoken));
       updateProgress(Math.max(progressWordRef.current, nextWord));
     };
     utterance.onend = () => {
       clearProgressTimer();
-      if (playbackSessionRef.current !== activeSession) return;
+      if (playbackSessionRef.current !== params.activeSession) return;
 
-      updateProgress(Math.max(progressWordRef.current, chunkEndWord));
+      updateProgress(Math.max(progressWordRef.current, params.chunkEndWord));
 
-      if (shouldContinuePlaybackRef.current && chunkEndWord < document.wordCount) {
-        startSpeech(chunkEndWord, activeSession, rate);
+      if (shouldContinuePlaybackRef.current && document && params.chunkEndWord < document.wordCount) {
+        void startSpeech(params.chunkEndWord, params.activeSession, params.rate);
         return;
       }
 
@@ -549,7 +804,7 @@ export function ReaderApp() {
       setStatusMessage("Lectura terminada. Tu avance quedó guardado.");
     };
     utterance.onerror = () => {
-      if (playbackSessionRef.current !== activeSession) return;
+      if (playbackSessionRef.current !== params.activeSession) return;
       clearProgressTimer();
       setIsPlaying(false);
       shouldContinuePlaybackRef.current = false;
@@ -557,21 +812,53 @@ export function ReaderApp() {
     };
 
     utteranceRef.current = utterance;
-    updateProgress(speechBaseWord);
+    updateProgress(params.speechBaseWord);
     window.speechSynthesis.speak(utterance);
-    startProgressTimer(speechBaseWord, chunkEndWord, rate);
+    startProgressTimer(params.speechBaseWord, params.chunkEndWord, params.rate);
     setIsPlaying(true);
-    setStatusMessage("Lectura iniciada con la voz disponible del navegador.");
+    setStatusMessage(params.statusMessage ?? "Lectura iniciada con la voz disponible del navegador.");
+  }
+
+  function decodeBase64Audio(audioBase64: string) {
+    const binary = window.atob(audioBase64);
+    const bytes = new Uint8Array(binary.length);
+
+    for (let index = 0; index < binary.length; index += 1) {
+      bytes[index] = binary.charCodeAt(index);
+    }
+
+    return bytes;
+  }
+
+  function providerLabel(provider: CloudSpeechProvider) {
+    if (provider === "azure") return "Azure";
+    if (provider === "google") return "Google Cloud";
+    return "navegador";
   }
 
   function togglePlayback() {
     if (!document) return;
 
     if (isPlaying) {
-      window.speechSynthesis.pause();
+      if (audioRef.current) {
+        audioRef.current.pause();
+      } else {
+        window.speechSynthesis.pause();
+      }
       clearProgressTimer();
       setIsPlaying(false);
       setStatusMessage("Lectura pausada. Avance guardado.");
+      return;
+    }
+
+    if (audioRef.current?.paused) {
+      shouldContinuePlaybackRef.current = true;
+      void audioRef.current.play().then(() => {
+        const segment = activeSegmentRef.current;
+        if (segment) startProgressTimer(currentWord, segment.endWord, segment.rate);
+        setIsPlaying(true);
+        setStatusMessage("Lectura reanudada.");
+      });
       return;
     }
 
@@ -588,7 +875,7 @@ export function ReaderApp() {
       return;
     }
 
-    startSpeech(currentWord);
+    void startSpeech(currentWord);
   }
 
   function seek(seconds: number) {
@@ -597,15 +884,12 @@ export function ReaderApp() {
     const wordsToMove = Math.round(((155 * preferences.rate) / 60) * seconds);
     const nextWord = Math.max(0, Math.min(document.wordCount, currentWord + wordsToMove));
 
-    shouldContinuePlaybackRef.current = false;
-    playbackSessionRef.current += 1;
-    window.speechSynthesis.cancel();
-    clearProgressTimer();
+    stopPlayback();
     updateProgress(nextWord);
     setIsPlaying(false);
 
     if (wasPlaying) {
-      startSpeech(nextWord);
+      void startSpeech(nextWord);
     }
   }
 
@@ -613,12 +897,9 @@ export function ReaderApp() {
     updatePreferences({ rate });
     setStatusMessage(`Velocidad actualizada a ${rate === 1 ? "Normal" : rate}.`);
     if (isPlaying) {
-      shouldContinuePlaybackRef.current = false;
-      playbackSessionRef.current += 1;
-      window.speechSynthesis.cancel();
-      clearProgressTimer();
+      stopPlayback();
       setIsPlaying(false);
-      startSpeech(currentWord, undefined, rate);
+      void startSpeech(currentWord, undefined, rate);
     }
   }
 
@@ -638,10 +919,7 @@ export function ReaderApp() {
   }
 
   function resetReading() {
-    shouldContinuePlaybackRef.current = false;
-    playbackSessionRef.current += 1;
-    window.speechSynthesis.cancel();
-    clearProgressTimer();
+    stopPlayback();
     setIsPlaying(false);
     updateProgress(0);
     setStatusMessage("Lectura reiniciada. Avance guardado.");
@@ -747,6 +1025,7 @@ export function ReaderApp() {
           <RotateCcw size={18} />
           Reiniciar
         </button>
+        {renderCloudUsageMeter("normal")}
       </>
     );
   }
@@ -814,7 +1093,27 @@ export function ReaderApp() {
         <button className="focus-exit-action" type="button" onClick={toggleFocusMode}>
           Salir
         </button>
+
+        {renderCloudUsageMeter("focus")}
       </aside>
+    );
+  }
+
+  function renderCloudUsageMeter(variant: "normal" | "focus") {
+    return (
+      <div
+        className={variant === "focus" ? "voice-usage-meter focus-usage-meter" : "voice-usage-meter"}
+        title={`Periodo mensual: ${usageMonthLabel}. Reinicia ${nextUsageResetLabel}.`}
+      >
+        <span>Voces gratis</span>
+        <strong className={hasReachedAzureLimit ? "limit-reached" : ""}>
+          Azure {azureUsagePercent}%
+        </strong>
+        <strong className={hasReachedGoogleLimit ? "limit-reached" : ""}>
+          Google {googleUsagePercent}%
+        </strong>
+        <small>reinicia {nextUsageResetLabel}</small>
+      </div>
     );
   }
 
@@ -1071,4 +1370,23 @@ async function documentElementFullscreen() {
       // Some mobile browsers block fullscreen outside specific gestures.
     }
   }
+}
+
+function calculateUsagePercent(value: number, limit: number) {
+  if (!Number.isFinite(limit) || limit <= 0) return 0;
+  return Math.min(100, Math.max(0, Math.round((value / limit) * 100)));
+}
+
+function formatUsageMonth(date: Date) {
+  return new Intl.DateTimeFormat("es-MX", {
+    month: "long",
+    year: "numeric",
+  }).format(date);
+}
+
+function formatUsageResetDate(date: Date) {
+  return new Intl.DateTimeFormat("es-MX", {
+    day: "numeric",
+    month: "short",
+  }).format(date);
 }
