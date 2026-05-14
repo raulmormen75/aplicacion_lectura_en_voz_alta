@@ -1,9 +1,9 @@
 "use client";
 
-import { DEFAULT_VOICE_ID } from "./voices";
 import type { StoredReaderState } from "./types";
 
 const STORAGE_KEY = "lector-documental-raul:v1";
+const DEFAULT_BROWSER_VOICE_ID = "browser-default";
 
 export const DEFAULT_READER_STATE: StoredReaderState = {
   document: null,
@@ -16,7 +16,7 @@ export const DEFAULT_READER_STATE: StoredReaderState = {
     updatedAt: new Date(0).toISOString(),
   },
   preferences: {
-    voiceId: DEFAULT_VOICE_ID,
+    voiceId: DEFAULT_BROWSER_VOICE_ID,
     rate: 1,
     theme: "warm-paper",
     readingMode: "standard",

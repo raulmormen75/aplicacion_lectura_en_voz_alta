@@ -670,38 +670,6 @@ button:focus-visible {
   white-space: nowrap;
 }
 
-.voice-usage-meter {
-  display: inline-flex;
-  max-width: 100%;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  color: rgba(242, 242, 238, 0.72);
-  font-size: 0.68rem;
-  font-weight: 740;
-  line-height: 1;
-  white-space: nowrap;
-}
-
-.voice-usage-meter span,
-.voice-usage-meter small {
-  color: rgba(242, 242, 238, 0.54);
-  font-size: inherit;
-}
-
-.voice-usage-meter strong {
-  border-radius: 999px;
-  background: rgba(242, 242, 238, 0.07);
-  color: rgba(242, 242, 238, 0.82);
-  padding: 5px 7px;
-  font-size: inherit;
-}
-
-.voice-usage-meter .limit-reached {
-  background: rgba(110, 31, 40, 0.76);
-  color: var(--ivory);
-}
-
 .mode-focus {
   position: fixed;
   inset: 0;
@@ -1153,11 +1121,6 @@ button:focus-visible {
     flex: 1;
   }
 
-  .voice-usage-meter {
-    flex-wrap: wrap;
-    row-gap: 5px;
-    font-size: 0.64rem;
-  }
 }
 
 @media (orientation: landscape) and (max-height: 560px) {

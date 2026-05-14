@@ -8,20 +8,6 @@ export type PlaybackRate = 1 | 0.75 | 0.5;
 
 export type OcrAction = "none" | "clean" | "reconstruct";
 
-export type CloudSpeechProvider = "azure" | "browser";
-
-export type ReaderVoice = {
-  id: string;
-  name: string;
-  country: "México" | "Gran Bretaña";
-  flag: "🇲🇽" | "🇬🇧";
-  locale: "es-MX" | "en-GB";
-  gender: "female" | "male";
-  maturity: "young" | "mature";
-  azureName: string;
-  description: string;
-};
-
 export type WordToken = {
   id: string;
   text: string;

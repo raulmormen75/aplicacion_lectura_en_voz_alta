@@ -1,4 +1,4 @@
-const CACHE_NAME = "lector-documental-raul-v5";
+const CACHE_NAME = "lector-documental-raul-v6";
 const APP_SHELL = ["/", "/manifest.webmanifest"];
 
 self.addEventListener("install", (event) => {

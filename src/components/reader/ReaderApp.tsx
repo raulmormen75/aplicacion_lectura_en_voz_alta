@@ -33,16 +33,7 @@ import {
   loadReaderState,
   saveReaderState,
 } from "@/lib/reader/storage";
-import {
-  addCloudSpeechUsage,
-  DEFAULT_AZURE_TTS_MONTHLY_LIMIT,
-  getCloudSpeechUsageWindow,
-  loadCloudSpeechUsage,
-  type CloudSpeechUsage,
-} from "@/lib/reader/cloudSpeechUsage";
-import { getVoiceForLanguage } from "@/lib/reader/voices";
 import type {
-  CloudSpeechProvider,
   PlaybackRate,
   ReaderDocument,
   ReaderPreferences,
@@ -56,21 +47,6 @@ type ProcessResponse = {
 
 type IntegrationsStatus = {
   gptOssReady: boolean;
-  ttsLimits?: {
-    billingPeriod: "calendar-month";
-    azureMonthlyCharacters: number;
-  };
-};
-
-type SpeechResponse = {
-  mode: "cloud-audio" | "browser-fallback";
-  provider: CloudSpeechProvider;
-  message?: string;
-  audioBase64?: string;
-  mimeType?: string;
-  characterCount?: number;
-  usage?: CloudSpeechUsage;
-  usageSource?: "local" | "server";
 };
 
 const SAMPLE_TEXT =
@@ -92,12 +68,8 @@ export function ReaderApp() {
   const [integrations, setIntegrations] = useState<IntegrationsStatus>({
     gptOssReady: false,
   });
-  const [cloudUsage, setCloudUsage] = useState<CloudSpeechUsage | null>(null);
-  const [usageNow, setUsageNow] = useState(() => new Date());
   const [isHydrated, setIsHydrated] = useState(false);
   const utteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
-  const audioRef = useRef<HTMLAudioElement | null>(null);
-  const audioUrlRef = useRef<string | null>(null);
   const activeSegmentRef = useRef<{
     startWord: number;
     endWord: number;
@@ -120,30 +92,15 @@ export function ReaderApp() {
     }
   }, []);
 
-  const clearCloudAudio = useCallback(() => {
-    if (audioRef.current) {
-      audioRef.current.pause();
-      audioRef.current.removeAttribute("src");
-      audioRef.current.load();
-      audioRef.current = null;
-    }
-
-    if (audioUrlRef.current) {
-      URL.revokeObjectURL(audioUrlRef.current);
-      audioUrlRef.current = null;
-    }
-  }, []);
-
   const stopPlayback = useCallback(
     (advanceSession = true) => {
       shouldContinuePlaybackRef.current = false;
       if (advanceSession) playbackSessionRef.current += 1;
       window.speechSynthesis?.cancel();
-      clearCloudAudio();
       clearProgressTimer();
       activeSegmentRef.current = null;
     },
-    [clearCloudAudio, clearProgressTimer],
+    [clearProgressTimer],
   );
 
   const tokens = useMemo(
@@ -201,30 +158,9 @@ export function ReaderApp() {
     currentWord,
     preferences.rate,
   );
-  const usageWindow = useMemo(() => getCloudSpeechUsageWindow(usageNow), [usageNow]);
-  const monthlyVoiceUsage = cloudUsage ?? {
-    monthKey: usageWindow.monthKey,
-    azureCharacters: 0,
-    updatedAt: new Date(0).toISOString(),
-    source: "local" as const,
-  };
-  const azureMonthlyLimit =
-    integrations.ttsLimits?.azureMonthlyCharacters ?? DEFAULT_AZURE_TTS_MONTHLY_LIMIT;
-  const azureUsagePercent = calculateUsagePercent(
-    monthlyVoiceUsage.azureCharacters,
-    azureMonthlyLimit,
-  );
-  const nextUsageResetLabel = formatUsageResetDate(usageWindow.endExclusive);
-  const usageMonthLabel = formatUsageMonth(usageWindow.start);
-  const usagePeriodLabel = `${formatUsageBoundaryDate(usageWindow.start)}-${formatUsageBoundaryDate(
-    usageWindow.endExclusive,
-  )}`;
-  const hasReachedAzureLimit = monthlyVoiceUsage.azureCharacters >= azureMonthlyLimit;
-
   useEffect(() => {
     window.queueMicrotask(() => {
       setState(loadReaderState());
-      setCloudUsage(loadCloudSpeechUsage());
       setIsHydrated(true);
     });
 
@@ -235,13 +171,6 @@ export function ReaderApp() {
     fetch("/api/integrations/status")
       .then((response) => response.json())
       .then((data: IntegrationsStatus) => setIntegrations(data))
-      .catch(() => undefined);
-
-    fetch("/api/speech/usage")
-      .then((response) => response.json())
-      .then((data: { configured: boolean; usage?: CloudSpeechUsage }) => {
-        if (data.configured && data.usage) setCloudUsage(data.usage);
-      })
       .catch(() => undefined);
 
     if ("serviceWorker" in navigator) {
@@ -273,24 +202,6 @@ export function ReaderApp() {
   useEffect(() => {
     progressWordRef.current = currentWord;
   }, [currentWord]);
-
-  useEffect(() => {
-    if (!isHydrated) return;
-
-    const refreshUsageWindow = () => {
-      setUsageNow(new Date());
-      setCloudUsage(loadCloudSpeechUsage());
-      fetch("/api/speech/usage")
-        .then((response) => response.json())
-        .then((data: { configured: boolean; usage?: CloudSpeechUsage }) => {
-          if (data.configured && data.usage) setCloudUsage(data.usage);
-        })
-        .catch(() => undefined);
-    };
-    const usageTimer = window.setInterval(refreshUsageWindow, 30 * 60 * 1000);
-
-    return () => window.clearInterval(usageTimer);
-  }, [isHydrated]);
 
   useEffect(() => {
     const activeWord = activeWordRef.current;
@@ -542,19 +453,43 @@ export function ReaderApp() {
     const availableVoices = systemVoices.length
       ? systemVoices
       : window.speechSynthesis.getVoices();
+    if (!availableVoices.length) return undefined;
+
     const documentLanguage = document?.detectedLanguage === "en" ? "en" : "es";
-    const localePrefix = documentLanguage === "en" ? "en" : "es";
     const regionalLocale = documentLanguage === "en" ? "en-GB" : "es-MX";
+    const exactRegionalVoices = availableVoices.filter((item) => item.lang === regionalLocale);
+    const mexicanNaturalVoice = exactRegionalVoices.find((item) => {
+      const name = normalizeVoiceName(item.name);
+      return name.includes("dalia") && (name.includes("natural") || name.includes("online"));
+    });
+    const britishNaturalVoice = exactRegionalVoices.find((item) => {
+      const name = normalizeVoiceName(item.name);
+      return (
+        (name.includes("ada") || name.includes("sonia") || name.includes("libby")) &&
+        (name.includes("natural") || name.includes("online"))
+      );
+    });
+    const browserDefaultVoice =
+      exactRegionalVoices.find((item) => item.default) ??
+      exactRegionalVoices.find((item) => normalizeVoiceName(item.name).includes("default"));
+    const naturalRegionalVoice = exactRegionalVoices.find((item) => {
+      const name = normalizeVoiceName(item.name);
+      return name.includes("natural") || name.includes("online");
+    });
 
     return (
-      availableVoices.find(
-        (item) =>
-          item.lang === regionalLocale &&
-          /female|mujer|woman|ximena|dalia|sonia|ada|sabina/i.test(item.name),
-      ) ??
-      availableVoices.find((item) => item.lang === regionalLocale) ??
-      availableVoices.find((item) => item.lang.startsWith(localePrefix))
+      (documentLanguage === "es" ? mexicanNaturalVoice : britishNaturalVoice) ??
+      browserDefaultVoice ??
+      naturalRegionalVoice ??
+      exactRegionalVoices[0]
     );
+  }
+
+  function normalizeVoiceName(name: string) {
+    return name
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .toLowerCase();
   }
 
   function getSpeechWindow(fromWord: number) {
@@ -612,7 +547,6 @@ export function ReaderApp() {
 
     if (!sessionId) {
       window.speechSynthesis?.cancel();
-      clearCloudAudio();
       clearProgressTimer();
     }
 
@@ -624,7 +558,7 @@ export function ReaderApp() {
       return;
     }
 
-    const { chunk, textToSpeak, speechBaseWord, chunkEndWord } = speechWindow;
+    const { textToSpeak, speechBaseWord, chunkEndWord } = speechWindow;
 
     if (!textToSpeak) {
       void startSpeech(chunkEndWord, activeSession, rate);
@@ -633,139 +567,14 @@ export function ReaderApp() {
 
     updateProgress(speechBaseWord);
     setIsPlaying(true);
-    setStatusMessage(
-      hasReachedAzureLimit
-        ? "Se alcanzó el límite mensual configurado de Azure. Se usará el navegador."
-        : "Preparando voz natural.",
-    );
-
-    try {
-      const response = await fetch("/api/speech/synthesize", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          text: textToSpeak,
-          voiceId: getVoiceForLanguage(chunk.language).id,
-          rate,
-          usage: loadCloudSpeechUsage(),
-        }),
-      });
-      const data = (await response.json()) as SpeechResponse;
-
-      if (playbackSessionRef.current !== activeSession) return;
-
-      if (data.mode === "cloud-audio" && data.audioBase64) {
-        if (data.usageSource === "server" && data.usage) {
-          setCloudUsage(data.usage);
-        } else {
-          setCloudUsage(addCloudSpeechUsage(data.provider, data.characterCount ?? textToSpeak.length));
-        }
-        playCloudAudio({
-          audioBase64: data.audioBase64,
-          mimeType: data.mimeType ?? "audio/mpeg",
-          provider: data.provider,
-          activeSession,
-          rate,
-          speechBaseWord,
-          chunkEndWord,
-          textToSpeak,
-        });
-        return;
-      }
-
-      startBrowserSpeech({
-        textToSpeak,
-        speechBaseWord,
-        chunkEndWord,
-        activeSession,
-        rate,
-        statusMessage: data.message,
-      });
-    } catch {
-      if (playbackSessionRef.current !== activeSession) return;
-      startBrowserSpeech({
-        textToSpeak,
-        speechBaseWord,
-        chunkEndWord,
-        activeSession,
-        rate,
-        statusMessage: "No se pudo conectar con la voz cloud. Se usará la voz del navegador.",
-      });
-    }
-  }
-
-  function playCloudAudio(params: {
-    audioBase64: string;
-    mimeType: string;
-    provider: CloudSpeechProvider;
-    activeSession: number;
-    rate: PlaybackRate;
-    speechBaseWord: number;
-    chunkEndWord: number;
-    textToSpeak: string;
-  }) {
-    clearCloudAudio();
-    boundarySeenRef.current = false;
-    const audioBlob = new Blob([decodeBase64Audio(params.audioBase64)], {
-      type: params.mimeType,
+    setStatusMessage("Preparando la voz predeterminada del navegador.");
+    startBrowserSpeech({
+      textToSpeak,
+      speechBaseWord,
+      chunkEndWord,
+      activeSession,
+      rate,
     });
-    const audioUrl = URL.createObjectURL(audioBlob);
-    const audio = new Audio(audioUrl);
-    audio.playbackRate = params.rate;
-    audioRef.current = audio;
-    audioUrlRef.current = audioUrl;
-    activeSegmentRef.current = {
-      startWord: params.speechBaseWord,
-      endWord: params.chunkEndWord,
-      rate: params.rate,
-    };
-
-    audio.ontimeupdate = () => {
-      if (playbackSessionRef.current !== params.activeSession) return;
-      if (!Number.isFinite(audio.duration) || audio.duration <= 0) return;
-
-      const segmentWords = Math.max(params.chunkEndWord - params.speechBaseWord, 1);
-      const progressRatio = Math.min(1, Math.max(0, audio.currentTime / audio.duration));
-      const nextWord = params.speechBaseWord + Math.floor(segmentWords * progressRatio);
-      updateProgress(Math.max(progressWordRef.current, nextWord));
-    };
-
-    audio.onended = () => {
-      clearProgressTimer();
-      if (playbackSessionRef.current !== params.activeSession) return;
-
-      updateProgress(Math.max(progressWordRef.current, params.chunkEndWord));
-      clearCloudAudio();
-
-      if (shouldContinuePlaybackRef.current && document && params.chunkEndWord < document.wordCount) {
-        void startSpeech(params.chunkEndWord, params.activeSession, params.rate);
-        return;
-      }
-
-      setIsPlaying(false);
-      setStatusMessage("Lectura terminada. Tu avance quedó guardado.");
-    };
-
-    audio.onerror = () => {
-      if (playbackSessionRef.current !== params.activeSession) return;
-      clearCloudAudio();
-      startBrowserSpeech(params);
-    };
-
-    updateProgress(params.speechBaseWord);
-    void audio
-      .play()
-      .then(() => {
-        if (playbackSessionRef.current !== params.activeSession) return;
-        startProgressTimer(params.speechBaseWord, params.chunkEndWord, params.rate);
-        setIsPlaying(true);
-        setStatusMessage(`Lectura iniciada con voz natural de ${providerLabel(params.provider)}.`);
-      })
-      .catch(() => {
-        if (playbackSessionRef.current !== params.activeSession) return;
-        clearCloudAudio();
-        startBrowserSpeech(params);
-      });
   }
 
   function startBrowserSpeech(params: {
@@ -776,7 +585,6 @@ export function ReaderApp() {
     rate: PlaybackRate;
     statusMessage?: string;
   }) {
-    clearCloudAudio();
     const utterance = new SpeechSynthesisUtterance(params.textToSpeak);
     const preferredSystemVoice = getPreferredSystemVoice();
     const utteranceLanguage =
@@ -828,48 +636,22 @@ export function ReaderApp() {
     window.speechSynthesis.speak(utterance);
     startProgressTimer(params.speechBaseWord, params.chunkEndWord, params.rate);
     setIsPlaying(true);
-    setStatusMessage(params.statusMessage ?? "Lectura iniciada con la voz disponible del navegador.");
-  }
-
-  function decodeBase64Audio(audioBase64: string) {
-    const binary = window.atob(audioBase64);
-    const bytes = new Uint8Array(binary.length);
-
-    for (let index = 0; index < binary.length; index += 1) {
-      bytes[index] = binary.charCodeAt(index);
-    }
-
-    return bytes;
-  }
-
-  function providerLabel(provider: CloudSpeechProvider) {
-    if (provider === "azure") return "Azure";
-    return "navegador";
+    setStatusMessage(
+      params.statusMessage ??
+        (preferredSystemVoice
+          ? `Lectura iniciada con la voz del navegador: ${preferredSystemVoice.name}.`
+          : "Lectura iniciada con la voz predeterminada del navegador."),
+    );
   }
 
   function togglePlayback() {
     if (!document) return;
 
     if (isPlaying) {
-      if (audioRef.current) {
-        audioRef.current.pause();
-      } else {
-        window.speechSynthesis.pause();
-      }
+      window.speechSynthesis.pause();
       clearProgressTimer();
       setIsPlaying(false);
       setStatusMessage("Lectura pausada. Avance guardado.");
-      return;
-    }
-
-    if (audioRef.current?.paused) {
-      shouldContinuePlaybackRef.current = true;
-      void audioRef.current.play().then(() => {
-        const segment = activeSegmentRef.current;
-        if (segment) startProgressTimer(currentWord, segment.endWord, segment.rate);
-        setIsPlaying(true);
-        setStatusMessage("Lectura reanudada.");
-      });
       return;
     }
 
@@ -1036,7 +818,6 @@ export function ReaderApp() {
           <RotateCcw size={18} />
           Reiniciar
         </button>
-        {renderCloudUsageMeter("normal")}
       </>
     );
   }
@@ -1104,27 +885,7 @@ export function ReaderApp() {
         <button className="focus-exit-action" type="button" onClick={toggleFocusMode}>
           Salir
         </button>
-
-        {renderCloudUsageMeter("focus")}
       </aside>
-    );
-  }
-
-  function renderCloudUsageMeter(variant: "normal" | "focus") {
-    return (
-      <div
-        className={variant === "focus" ? "voice-usage-meter focus-usage-meter" : "voice-usage-meter"}
-        title={`Periodo mensual: ${usageMonthLabel}. Inicia ${formatUsageResetDate(
-          usageWindow.start,
-        )} y termina ${nextUsageResetLabel}.`}
-      >
-        <span>Azure gratis</span>
-        <strong className={hasReachedAzureLimit ? "limit-reached" : ""}>
-          {azureUsagePercent}%
-        </strong>
-        <small>{usagePeriodLabel}</small>
-        {monthlyVoiceUsage.source === "server" ? <small>global</small> : null}
-      </div>
     );
   }
 
@@ -1381,32 +1142,4 @@ async function documentElementFullscreen() {
       // Some mobile browsers block fullscreen outside specific gestures.
     }
   }
-}
-
-function calculateUsagePercent(value: number, limit: number) {
-  if (!Number.isFinite(limit) || limit <= 0) return 0;
-  return Math.min(100, Math.max(0, Math.round((value / limit) * 100)));
-}
-
-function formatUsageMonth(date: Date) {
-  return new Intl.DateTimeFormat("es-MX", {
-    month: "long",
-    year: "numeric",
-  }).format(date);
-}
-
-function formatUsageResetDate(date: Date) {
-  return new Intl.DateTimeFormat("es-MX", {
-    day: "numeric",
-    month: "short",
-  }).format(date);
-}
-
-function formatUsageBoundaryDate(date: Date) {
-  return new Intl.DateTimeFormat("es-MX", {
-    day: "numeric",
-    month: "short",
-  })
-    .format(date)
-    .replace(".", "");
 }
