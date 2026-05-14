@@ -172,9 +172,9 @@ async function extractFileText(file: File) {
     fileName.endsWith(".docx")
   ) {
     const mammoth = await import("mammoth");
-    const result = await mammoth.extractRawText({ buffer });
+    const result = await mammoth.convertToHtml({ buffer });
     return {
-      text: result.value,
+      text: await extractStructuredTextFromHtml(result.value),
       needsOcr: false,
     };
   }
@@ -213,10 +213,7 @@ async function extractPdfText(arrayBuffer: ArrayBuffer) {
   for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
     const page = await pdf.getPage(pageNumber);
     const content = await page.getTextContent();
-    const pageText = content.items
-      .map((item) => ("str" in item ? item.str : ""))
-      .join(" ")
-      .trim();
+    const pageText = extractPdfPageText(content.items).trim();
     if (pageText) pages.push(pageText);
   }
 
@@ -316,7 +313,9 @@ async function extractWebsiteText(url: string) {
   const dom = new JSDOM(html, { url });
   const reader = new Readability(dom.window.document);
   const article = reader.parse();
-  const text = article?.textContent?.trim() || dom.window.document.body.textContent?.trim() || "";
+  const text = article?.content
+    ? await extractStructuredTextFromHtml(article.content, url)
+    : extractStructuredTextFromElement(dom.window.document.body);
 
   if (!text) {
     throw new Error("No se encontró texto legible en el sitio web.");
@@ -351,4 +350,182 @@ async function extractGoogleDocText(url: string) {
 function getGoogleDocId(url: string) {
   const match = url.match(/\/document\/d\/([a-zA-Z0-9_-]+)/);
   return match?.[1] ?? null;
+}
+
+type PdfTextContentItem = {
+  str?: string;
+  transform?: number[];
+  width?: number;
+  height?: number;
+  hasEOL?: boolean;
+};
+
+type PdfLine = {
+  y: number;
+  height: number;
+  parts: Array<{
+    x: number;
+    width: number;
+    text: string;
+  }>;
+};
+
+function extractPdfPageText(items: unknown[]) {
+  const positionedText = extractPdfTextFromPositions(items);
+  if (positionedText) return positionedText;
+
+  const lines: string[] = [];
+  let buffer = "";
+
+  for (const item of items) {
+    if (!isPdfTextContentItem(item)) continue;
+    buffer += item.str ?? "";
+
+    if (item.hasEOL) {
+      const cleanLine = buffer.replace(/\s+/g, " ").trim();
+      if (cleanLine) lines.push(cleanLine);
+      buffer = "";
+    }
+  }
+
+  const cleanLine = buffer.replace(/\s+/g, " ").trim();
+  if (cleanLine) lines.push(cleanLine);
+
+  return lines.join("\n");
+}
+
+function extractPdfTextFromPositions(items: unknown[]) {
+  const lines: PdfLine[] = [];
+
+  for (const item of items) {
+    if (!isPdfTextContentItem(item)) continue;
+    const text = (item.str ?? "").trim();
+    const transform = item.transform;
+    if (!text || !transform || transform.length < 6) continue;
+
+    const x = transform[4] ?? 0;
+    const y = transform[5] ?? 0;
+    const height = Math.max(Math.abs(item.height ?? transform[3] ?? 10), 1);
+    const tolerance = Math.max(2, height * 0.35);
+    let line = lines.find((candidate) => Math.abs(candidate.y - y) <= tolerance);
+
+    if (!line) {
+      line = { y, height, parts: [] };
+      lines.push(line);
+    }
+
+    line.height = Math.max(line.height, height);
+    line.parts.push({
+      x,
+      width: Math.max(item.width ?? text.length * height * 0.45, 0),
+      text,
+    });
+  }
+
+  if (!lines.length) return "";
+
+  const orderedLines = lines
+    .sort((a, b) => b.y - a.y)
+    .map((line) => ({
+      ...line,
+      text: joinPdfLineParts(line),
+    }))
+    .filter((line) => line.text);
+  const pageLines: string[] = [];
+
+  orderedLines.forEach((line, index) => {
+    const previous = orderedLines[index - 1];
+    if (previous) {
+      const verticalGap = Math.abs(previous.y - line.y);
+      const lineHeight = Math.max(previous.height, line.height, 1);
+      if (verticalGap > lineHeight * 1.65) pageLines.push("");
+    }
+
+    pageLines.push(line.text);
+  });
+
+  return pageLines.join("\n");
+}
+
+function joinPdfLineParts(line: PdfLine) {
+  const parts = line.parts.sort((a, b) => a.x - b.x);
+  let output = "";
+  let previousEnd = 0;
+
+  parts.forEach((part, index) => {
+    if (index > 0) {
+      const gap = part.x - previousEnd;
+      if (gap > line.height * 0.24 && !output.endsWith(" ")) output += " ";
+    }
+
+    output += part.text;
+    previousEnd = Math.max(previousEnd, part.x + part.width);
+  });
+
+  return output.replace(/\s+/g, " ").trim();
+}
+
+function isPdfTextContentItem(item: unknown): item is PdfTextContentItem {
+  return typeof item === "object" && item !== null && "str" in item;
+}
+
+async function extractStructuredTextFromHtml(html: string, url?: string) {
+  const { JSDOM } = await import("jsdom");
+  const dom = new JSDOM(html, url ? { url } : undefined);
+  return extractStructuredTextFromElement(dom.window.document.body);
+}
+
+function extractStructuredTextFromElement(root: Element | null) {
+  if (!root) return "";
+
+  const blocks: string[] = [];
+  const blockTags = new Set([
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "p",
+    "li",
+    "blockquote",
+    "figcaption",
+    "td",
+    "th",
+  ]);
+
+  const visit = (element: Element) => {
+    const tag = element.tagName.toLowerCase();
+
+    if (blockTags.has(tag)) {
+      const text = collapseElementText(element.textContent ?? "");
+      if (!text) return;
+
+      if (tag.startsWith("h")) {
+        const level = Math.min(Number(tag.slice(1)) || 2, 6);
+        blocks.push(`${"#".repeat(level)} ${text}`);
+        return;
+      }
+
+      if (tag === "li") {
+        blocks.push(`- ${text}`);
+        return;
+      }
+
+      blocks.push(text);
+      return;
+    }
+
+    Array.from(element.children).forEach(visit);
+  };
+
+  Array.from(root.children).forEach(visit);
+
+  if (!blocks.length) return collapseElementText(root.textContent ?? "");
+
+  return blocks.join("\n\n");
+}
+
+function collapseElementText(text: string) {
+  return text.replace(/\s+/g, " ").trim();
 }

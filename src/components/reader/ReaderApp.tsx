@@ -18,7 +18,7 @@ import {
 } from "lucide-react";
 import Image from "next/image";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { ChangeEvent, MouseEvent } from "react";
+import type { ChangeEvent, MouseEvent, RefObject } from "react";
 import {
   calculatePercentage,
   cleanTextWithoutInventing,
@@ -26,6 +26,7 @@ import {
   createDocumentFromText,
   estimateRemainingSeconds,
   formatRemainingTime,
+  segmentTextBlocks,
   tokenizeWords,
 } from "@/lib/reader/text";
 import {
@@ -38,6 +39,8 @@ import type {
   ReaderDocument,
   ReaderPreferences,
   StoredReaderState,
+  TextBlock,
+  TextBlockKind,
 } from "@/lib/reader/types";
 
 type ProcessResponse = {
@@ -47,6 +50,19 @@ type ProcessResponse = {
 
 type IntegrationsStatus = {
   gptOssReady: boolean;
+};
+
+type VisibleTextPart = {
+  id: string;
+  text: string;
+  type: "word" | "text";
+  wordIndex?: number;
+};
+
+type VisibleTextBlock = {
+  id: string;
+  kind: TextBlockKind;
+  parts: VisibleTextPart[];
 };
 
 const SAMPLE_TEXT =
@@ -107,8 +123,12 @@ export function ReaderApp() {
     () => tokenizeWords(document?.cleanText ?? ""),
     [document?.cleanText],
   );
+  const textBlocks = useMemo(
+    () => getDocumentBlocks(document),
+    [document],
+  );
   const currentWord = Math.min(state.progress.currentWord, document?.wordCount ?? 0);
-  const visibleTextParts = useMemo(() => {
+  const visibleTextBlocks = useMemo(() => {
     if (!document || tokens.length === 0) return [];
 
     const startWord = Math.max(0, currentWord - READER_WINDOW_BEFORE);
@@ -116,42 +136,22 @@ export function ReaderApp() {
     const visibleWords = tokens.slice(startWord, endWord);
     const windowStart = visibleWords[0]?.start ?? 0;
     const windowEnd = visibleWords.at(-1)?.end ?? document.cleanText.length;
-    const parts: Array<{
-      id: string;
-      text: string;
-      type: "word" | "text";
-      wordIndex?: number;
-    }> = [];
-    let cursor = windowStart;
 
-    for (const token of visibleWords) {
-      if (token.start > cursor) {
-        parts.push({
-          id: `t-${cursor}-${token.start}`,
-          text: document.cleanText.slice(cursor, token.start),
-          type: "text",
-        });
-      }
-
-      parts.push({
-        id: token.id,
-        text: token.text,
-        type: "word",
-        wordIndex: token.wordIndex,
-      });
-      cursor = token.end;
-    }
-
-    if (cursor < windowEnd) {
-      parts.push({
-        id: `t-${cursor}-${windowEnd}`,
-        text: document.cleanText.slice(cursor, windowEnd),
-        type: "text",
-      });
-    }
-
-    return parts;
-  }, [currentWord, document, tokens]);
+    return textBlocks
+      .filter((block) => block.end > windowStart && block.start < windowEnd)
+      .map((block) => ({
+        id: block.id,
+        kind: block.kind,
+        parts: createVisibleTextParts({
+          block,
+          cleanText: document.cleanText,
+          tokens: visibleWords,
+          windowStart,
+          windowEnd,
+        }),
+      }))
+      .filter((block) => block.parts.length > 0);
+  }, [currentWord, document, textBlocks, tokens]);
   const percentage = calculatePercentage(document?.wordCount ?? 0, currentWord);
   const remainingSeconds = estimateRemainingSeconds(
     document?.wordCount ?? 0,
@@ -385,8 +385,12 @@ export function ReaderApp() {
       });
       const data = await readProcessResponse(response, "No se pudo procesar el texto.");
 
-      if (data.document) setDocument(data.document);
-      else setStatusMessage(data.error ?? "No se pudo procesar el texto.");
+      if (data.document) {
+        setPastedText(data.document.cleanText);
+        setDocument(data.document);
+      } else {
+        setStatusMessage(data.error ?? "No se pudo procesar el texto.");
+      }
     } catch {
       setStatusMessage("No se pudo conectar con el procesador de texto.");
     } finally {
@@ -1047,18 +1051,8 @@ export function ReaderApp() {
                       : undefined
                   }
                 >
-                  {visibleTextParts.map((part) =>
-                    part.type === "word" ? (
-                      <span
-                        key={part.id}
-                        ref={part.wordIndex === currentWord ? activeWordRef : undefined}
-                        className={part.wordIndex === currentWord ? "word active-word" : "word"}
-                      >
-                        {part.text}
-                      </span>
-                    ) : (
-                      <span key={part.id}>{part.text}</span>
-                    ),
+                  {visibleTextBlocks.map((block) =>
+                    renderStructuredTextBlock(block, currentWord, activeWordRef),
                   )}
                 </div>
               </article>
@@ -1130,6 +1124,99 @@ export function ReaderApp() {
 
       {preferences.readingMode === "focus" && focusControlsVisible ? renderFocusControls() : null}
     </main>
+  );
+}
+
+function getDocumentBlocks(document: ReaderDocument | null): TextBlock[] {
+  if (!document) return [];
+  if (document.blocks?.length) return document.blocks;
+  return segmentTextBlocks(document.cleanText);
+}
+
+function createVisibleTextParts(params: {
+  block: TextBlock;
+  cleanText: string;
+  tokens: ReturnType<typeof tokenizeWords>;
+  windowStart: number;
+  windowEnd: number;
+}) {
+  const blockStart = Math.max(params.block.start, params.windowStart);
+  const blockEnd = Math.min(params.block.end, params.windowEnd);
+  const blockTokens = params.tokens.filter(
+    (token) => token.start >= blockStart && token.end <= blockEnd,
+  );
+  const parts: VisibleTextPart[] = [];
+  let cursor = blockStart;
+
+  for (const token of blockTokens) {
+    if (token.start > cursor) {
+      parts.push({
+        id: `t-${cursor}-${token.start}`,
+        text: params.cleanText.slice(cursor, token.start),
+        type: "text",
+      });
+    }
+
+    parts.push({
+      id: token.id,
+      text: token.text,
+      type: "word",
+      wordIndex: token.wordIndex,
+    });
+    cursor = token.end;
+  }
+
+  if (cursor < blockEnd) {
+    parts.push({
+      id: `t-${cursor}-${blockEnd}`,
+      text: params.cleanText.slice(cursor, blockEnd),
+      type: "text",
+    });
+  }
+
+  return parts.filter((part) => part.text.length > 0);
+}
+
+function renderStructuredTextBlock(
+  block: VisibleTextBlock,
+  currentWord: number,
+  activeWordRef: RefObject<HTMLSpanElement | null>,
+) {
+  const content = block.parts.map((part) =>
+    part.type === "word" ? (
+      <span
+        key={part.id}
+        ref={part.wordIndex === currentWord ? activeWordRef : undefined}
+        className={part.wordIndex === currentWord ? "word active-word" : "word"}
+      >
+        {part.text}
+      </span>
+    ) : (
+      <span key={part.id}>{part.text}</span>
+    ),
+  );
+  const className = `text-block text-block-${block.kind}`;
+
+  if (block.kind === "heading") {
+    return (
+      <h2 key={block.id} className={className}>
+        {content}
+      </h2>
+    );
+  }
+
+  if (block.kind === "subheading") {
+    return (
+      <h3 key={block.id} className={className}>
+        {content}
+      </h3>
+    );
+  }
+
+  return (
+    <p key={block.id} className={className}>
+      {content}
+    </p>
   );
 }
 

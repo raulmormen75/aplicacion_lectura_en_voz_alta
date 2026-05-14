@@ -421,7 +421,54 @@ button:focus-visible {
   font-size: clamp(1.12rem, 1.4vw, 1.42rem);
   font-weight: 560;
   line-height: 1.92;
-  white-space: pre-wrap;
+  white-space: normal;
+}
+
+.text-block {
+  margin: 0 0 1.18em;
+}
+
+.text-block:last-child {
+  margin-bottom: 0;
+}
+
+.text-block-heading,
+.text-block-subheading {
+  color: inherit;
+  font-weight: 860;
+  line-height: 1.28;
+}
+
+.text-block-heading {
+  margin: 0.18em 0 0.72em;
+  font-size: 1.28em;
+}
+
+.text-block-subheading {
+  margin: 0.12em 0 0.62em;
+  font-size: 1.08em;
+}
+
+.text-block-paragraph {
+  text-wrap: pretty;
+}
+
+.text-block-bullet {
+  position: relative;
+  margin-bottom: 0.72em;
+  padding-left: 1.25em;
+}
+
+.text-block-bullet::before {
+  content: "";
+  position: absolute;
+  top: 0.72em;
+  left: 0.22em;
+  width: 0.38em;
+  height: 0.38em;
+  border-radius: 999px;
+  background: var(--gold);
+  box-shadow: 0 0 0 3px rgba(198, 167, 94, 0.16);
 }
 
 .word {
@@ -749,6 +796,25 @@ button:focus-visible {
   padding: 18dvh clamp(24px, 5vw, 72px) 22dvh;
   font-size: clamp(1.38rem, 2.6vw, 2.2rem);
   -webkit-overflow-scrolling: touch;
+}
+
+.mode-focus .text-block {
+  margin-bottom: 1.28em;
+}
+
+.mode-focus .text-block-heading {
+  margin-top: 0.2em;
+  margin-bottom: 0.78em;
+  font-size: 1.22em;
+}
+
+.mode-focus .text-block-subheading {
+  margin-bottom: 0.7em;
+  font-size: 1.08em;
+}
+
+.mode-focus .text-block-bullet {
+  margin-bottom: 0.82em;
 }
 
 .mode-focus .active-word {

@@ -16,6 +16,18 @@ export type WordToken = {
   end: number;
 };
 
+export type TextBlockKind = "heading" | "subheading" | "paragraph" | "bullet";
+
+export type TextBlock = {
+  id: string;
+  kind: TextBlockKind;
+  text: string;
+  start: number;
+  end: number;
+  startWord: number;
+  wordCount: number;
+};
+
 export type TextChunk = {
   id: string;
   text: string;
@@ -33,6 +45,7 @@ export type ReaderDocument = {
   createdAt: string;
   originalText: string;
   cleanText: string;
+  blocks?: TextBlock[];
   chunks: TextChunk[];
   wordCount: number;
   detectedLanguage: "es" | "en" | "mixed";
