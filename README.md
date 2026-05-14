@@ -24,12 +24,14 @@ Para la lectura en voz alta del navegador no se necesita ninguna llave de pago.
 ```env
 NEXTAUTH_URL=
 NEXTAUTH_SECRET=
+GPT_OSS_ENDPOINT=
 ```
 
 Notas:
 
 - La calidad de la voz depende de las voces que cada navegador y sistema operativo expongan a la Web Speech API.
 - En escritorio, Edge suele ofrecer mejores voces naturales de Microsoft que otros navegadores.
+- La reconstrucción con IA ligera es opcional y no corre dentro del navegador. Si `GPT_OSS_ENDPOINT` queda vacío, la app usa limpieza local sin inventar contenido.
 
 ## Comandos de verificación
 

@@ -1102,12 +1102,16 @@ export function ReaderApp() {
               <button type="button" onClick={applyCleanOnly}>
                 Limpiar sin inventar
               </button>
-              <button type="button" onClick={reconstructLegibleText}>
-                Reconstruir legible
-              </button>
-              <small>
-                gpt-oss: {integrations.gptOssReady ? "configurado" : "pendiente"}
-              </small>
+              {integrations.gptOssReady ? (
+                <>
+                  <button type="button" onClick={reconstructLegibleText}>
+                    Reconstruir con IA ligera
+                  </button>
+                  <small>IA local ligera disponible para texto difícil.</small>
+                </>
+              ) : (
+                <small>La limpieza local está activa. La reconstrucción con IA ligera no está configurada.</small>
+              )}
             </div>
           ) : null}
 

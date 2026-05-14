@@ -17,7 +17,7 @@ export async function POST(request: Request) {
     return NextResponse.json({
       mode: "clean-only",
       message:
-        "No hay un endpoint gpt-oss configurado. Se aplicó limpieza sin inventar contenido.",
+        "No hay IA ligera configurada. Se aplicó limpieza local sin inventar contenido.",
       text: cleanTextWithoutInventing(text),
     });
   }
@@ -38,7 +38,7 @@ export async function POST(request: Request) {
     return NextResponse.json({
       mode: "clean-only",
       message:
-        "El endpoint gpt-oss no respondió. Se aplicó limpieza sin inventar contenido.",
+        "La IA ligera no respondió. Se aplicó limpieza local sin inventar contenido.",
       text: cleanTextWithoutInventing(text),
     });
   }
@@ -57,7 +57,7 @@ export async function POST(request: Request) {
 
   return NextResponse.json({
     mode: "reconstructed",
-    message: "Texto reconstruido con el endpoint gpt-oss configurado.",
+    message: "Texto reconstruido con IA ligera configurada.",
     text: reconstructed.trim() || cleanTextWithoutInventing(text),
   });
 }
