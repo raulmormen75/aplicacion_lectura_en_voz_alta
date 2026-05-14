@@ -100,6 +100,8 @@ export function ReaderApp() {
 
   const document = state.document;
   const preferences = state.preferences;
+  const shouldShowTextReview =
+    document?.quality.status !== "ready" && document?.quality.ocrAvailable === true;
 
   const clearProgressTimer = useCallback(() => {
     if (intervalRef.current) {
@@ -725,15 +727,24 @@ export function ReaderApp() {
   async function applyCleanOnly() {
     if (!document) return;
     const cleaned = cleanTextWithoutInventing(document.originalText);
+
+    if (!cleaned.trim()) {
+      setStatusMessage("No se pudo aplicar limpieza local porque no hay texto legible suficiente.");
+      return;
+    }
+
     setDocument(
       createDocumentFromText({
         title: document.title,
         source: document.source,
         sourceLabel: document.sourceLabel,
         text: cleaned,
-        qualityMessage: "Texto limpiado sin inventar contenido.",
+        qualityStatus: "ready",
+        qualityMessage: "Limpieza local aplicada sin inventar contenido.",
+        ocrAvailable: false,
       }),
     );
+    setStatusMessage("Limpieza local aplicada: se retiraron citas, símbolos y marcas visuales sin inventar contenido.");
   }
 
   async function reconstructLegibleText() {
@@ -753,9 +764,12 @@ export function ReaderApp() {
         source: document.source,
         sourceLabel: document.sourceLabel,
         text: data.text,
+        qualityStatus: "ready",
         qualityMessage: data.message,
+        ocrAvailable: false,
       }),
     );
+    setStatusMessage(data.message);
   }
 
   async function toggleFocusMode() {
@@ -1094,7 +1108,7 @@ export function ReaderApp() {
             </button>
           </div>
 
-          {document && document.quality.status !== "ready" ? (
+          {shouldShowTextReview ? (
             <div className="ocr-card">
               <Sparkles size={18} />
               <h3>Texto difícil de leer</h3>
@@ -1102,6 +1116,9 @@ export function ReaderApp() {
               <button type="button" onClick={applyCleanOnly}>
                 Limpiar sin inventar
               </button>
+              <small>
+                Limpieza local por reglas: quita citas, símbolos, emojis y marcas visuales sin inventar contenido.
+              </small>
               {integrations.gptOssReady ? (
                 <>
                   <button type="button" onClick={reconstructLegibleText}>
@@ -1110,7 +1127,7 @@ export function ReaderApp() {
                   <small>IA local ligera disponible para texto difícil.</small>
                 </>
               ) : (
-                <small>La limpieza local está activa. La reconstrucción con IA ligera no está configurada.</small>
+                <small>La reconstrucción con IA ligera es opcional y no está configurada.</small>
               )}
             </div>
           ) : null}

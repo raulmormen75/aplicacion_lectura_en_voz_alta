@@ -183,7 +183,9 @@ export function createDocumentFromText(params: {
   source: ReaderDocument["source"];
   sourceLabel: string;
   text: string;
+  qualityStatus?: ReaderDocument["quality"]["status"];
   qualityMessage?: string;
+  ocrAvailable?: boolean;
 }) {
   const preparedText = prepareTextForReading(params.text);
   const cleanText = preparedText.cleanText;
@@ -191,6 +193,12 @@ export function createDocumentFromText(params: {
   const chunks = splitIntoChunks(cleanText);
   const detectedLanguage = detectLanguage(cleanText);
   const needsReview = wordCount === 0 || incoherenceScore(cleanText) > 0.22;
+  const qualityStatus =
+    wordCount > 0 && params.qualityStatus
+      ? params.qualityStatus
+      : needsReview
+        ? "needs-review"
+        : "ready";
 
   return {
     id: globalThis.crypto?.randomUUID?.() ?? `${Date.now()}`,
@@ -205,13 +213,13 @@ export function createDocumentFromText(params: {
     wordCount,
     detectedLanguage,
     quality: {
-      status: needsReview ? "needs-review" : "ready",
+      status: qualityStatus,
       message:
         params.qualityMessage ??
-        (needsReview
+        (qualityStatus !== "ready"
           ? "El texto requiere revisión antes de leerse con naturalidad."
           : "Documento listo para escuchar."),
-      ocrAvailable: params.source === "file",
+      ocrAvailable: params.ocrAvailable ?? params.source === "file",
     },
   } satisfies ReaderDocument;
 }

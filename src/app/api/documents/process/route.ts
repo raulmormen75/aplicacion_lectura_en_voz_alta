@@ -92,11 +92,12 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({
         document: createDocumentFromText({
           title: article.title || new URL(payload.url).hostname,
-          source: "website",
-          sourceLabel: payload.url,
-          text: article.text,
-          qualityMessage: "Sitio web procesado y listo para escuchar.",
-        }),
+        source: "website",
+        sourceLabel: payload.url,
+        text: article.text,
+        qualityStatus: "ready",
+        qualityMessage: "Sitio web procesado y listo para escuchar.",
+      }),
       });
     }
 
@@ -112,6 +113,7 @@ export async function POST(request: NextRequest) {
           source: "googleDoc",
           sourceLabel: payload.url,
           text: exported.text,
+          qualityStatus: "ready",
           qualityMessage: "Documento de Google importado y listo para escuchar.",
         }),
       });
@@ -127,7 +129,9 @@ export async function POST(request: NextRequest) {
         source: "pastedText",
         sourceLabel: "Texto pegado",
         text: payload.text,
-        qualityMessage: "Texto limpio y listo para escuchar.",
+        qualityStatus: "ready",
+        qualityMessage: "Limpieza local aplicada y lista para escuchar.",
+        ocrAvailable: false,
       }),
     });
   } catch (error) {
