@@ -801,7 +801,7 @@ export function ReaderApp() {
         </div>
 
         <div className="speed-control" aria-label="Velocidad de lectura">
-          {([1, 0.75, 0.5] as PlaybackRate[]).map((rate) => (
+          {([1, 0.85, 0.75, 0.5] as PlaybackRate[]).map((rate) => (
             <button
               key={rate}
               type="button"
@@ -854,7 +854,7 @@ export function ReaderApp() {
         </div>
 
         <div className="focus-speed" aria-label="Velocidad">
-          {([1, 0.75, 0.5] as PlaybackRate[]).map((rate) => (
+          {([1, 0.85, 0.75, 0.5] as PlaybackRate[]).map((rate) => (
             <button
               key={rate}
               type="button"

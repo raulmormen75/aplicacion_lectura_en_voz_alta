@@ -4,7 +4,7 @@ export type ReaderTheme = "warm-paper" | "night";
 
 export type ReadingMode = "standard" | "focus";
 
-export type PlaybackRate = 1 | 0.75 | 0.5;
+export type PlaybackRate = 1 | 0.85 | 0.75 | 0.5;
 
 export type OcrAction = "none" | "clean" | "reconstruct";
 
