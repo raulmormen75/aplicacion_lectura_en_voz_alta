@@ -68,6 +68,7 @@ type VisibleTextBlock = {
 const SAMPLE_TEXT =
   "La lectura científica exige atención, ritmo y continuidad. Esta aplicación convierte documentos largos en una experiencia auditiva clara, con avance guardado, resaltado visual y controles diseñados para retomar el contenido sin perder el hilo.";
 const MAX_CLIENT_UPLOAD_BYTES = 25 * 1024 * 1024;
+const VOICE_LOAD_TIMEOUT_MS = 900;
 const READER_WINDOW_BEFORE = 90;
 const READER_WINDOW_AFTER = 180;
 
@@ -455,10 +456,12 @@ export function ReaderApp() {
     );
   }
 
-  function getPreferredSystemVoice() {
-    const availableVoices = systemVoices.length
-      ? systemVoices
-      : window.speechSynthesis.getVoices();
+  function getAvailableSpeechVoices() {
+    return systemVoices.length ? systemVoices : window.speechSynthesis.getVoices();
+  }
+
+  function getPreferredSystemVoice(voices = getAvailableSpeechVoices()) {
+    const availableVoices = voices;
     if (!availableVoices.length) return undefined;
 
     const documentLanguage = document?.detectedLanguage === "en" ? "en" : "es";
@@ -489,6 +492,35 @@ export function ReaderApp() {
       naturalRegionalVoice ??
       exactRegionalVoices[0]
     );
+  }
+
+  async function waitForSpeechVoices() {
+    const initialVoices = window.speechSynthesis.getVoices();
+    if (initialVoices.length > 0) {
+      setSystemVoices(initialVoices);
+      return initialVoices;
+    }
+
+    return new Promise<SpeechSynthesisVoice[]>((resolve) => {
+      let settled = false;
+      const finish = (voices: SpeechSynthesisVoice[]) => {
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(timeoutId);
+        window.speechSynthesis?.removeEventListener?.("voiceschanged", handleVoicesChanged);
+        setSystemVoices(voices);
+        resolve(voices);
+      };
+      const handleVoicesChanged = () => {
+        const voices = window.speechSynthesis.getVoices();
+        if (voices.length > 0) finish(voices);
+      };
+      const timeoutId = window.setTimeout(() => {
+        finish(window.speechSynthesis.getVoices());
+      }, VOICE_LOAD_TIMEOUT_MS);
+
+      window.speechSynthesis?.addEventListener?.("voiceschanged", handleVoicesChanged);
+    });
   }
 
   function normalizeVoiceName(name: string) {
@@ -573,13 +605,18 @@ export function ReaderApp() {
 
     updateProgress(speechBaseWord);
     setIsPlaying(true);
-    setStatusMessage("Preparando la voz predeterminada del navegador.");
+    setStatusMessage("Buscando la mejor voz disponible en este navegador.");
+    const availableVoices = await waitForSpeechVoices();
+    if (playbackSessionRef.current !== activeSession) return;
+
+    const preferredSystemVoice = getPreferredSystemVoice(availableVoices);
     startBrowserSpeech({
       textToSpeak,
       speechBaseWord,
       chunkEndWord,
       activeSession,
       rate,
+      preferredSystemVoice,
     });
   }
 
@@ -589,10 +626,11 @@ export function ReaderApp() {
     chunkEndWord: number;
     activeSession: number;
     rate: PlaybackRate;
+    preferredSystemVoice?: SpeechSynthesisVoice;
     statusMessage?: string;
   }) {
     const utterance = new SpeechSynthesisUtterance(params.textToSpeak);
-    const preferredSystemVoice = getPreferredSystemVoice();
+    const preferredSystemVoice = params.preferredSystemVoice;
     const utteranceLanguage =
       preferredSystemVoice?.lang ?? (document?.detectedLanguage === "en" ? "en-GB" : "es-MX");
 
