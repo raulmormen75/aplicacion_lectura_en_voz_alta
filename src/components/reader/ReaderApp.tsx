@@ -467,6 +467,11 @@ export function ReaderApp() {
     const documentLanguage = document?.detectedLanguage === "en" ? "en" : "es";
     const regionalLocale = documentLanguage === "en" ? "en-GB" : "es-MX";
     const exactRegionalVoices = availableVoices.filter((item) => item.lang === regionalLocale);
+    const languageVoices = availableVoices.filter((item) =>
+      item.lang.toLowerCase().startsWith(`${documentLanguage}-`),
+    );
+    const latinSpanishVoices =
+      documentLanguage === "es" ? availableVoices.filter(isLatinSpanishVoice) : [];
     const mexicanNaturalVoice = exactRegionalVoices.find((item) => {
       const name = normalizeVoiceName(item.name);
       return name.includes("dalia") && (name.includes("natural") || name.includes("online"));
@@ -485,12 +490,22 @@ export function ReaderApp() {
       const name = normalizeVoiceName(item.name);
       return name.includes("natural") || name.includes("online");
     });
+    const latinSpanishNaturalVoice = latinSpanishVoices.find((item) => {
+      const name = normalizeVoiceName(item.name);
+      return name.includes("natural") || name.includes("online") || name.includes("google");
+    });
 
     return (
       (documentLanguage === "es" ? mexicanNaturalVoice : britishNaturalVoice) ??
       browserDefaultVoice ??
       naturalRegionalVoice ??
-      exactRegionalVoices[0]
+      exactRegionalVoices[0] ??
+      latinSpanishNaturalVoice ??
+      latinSpanishVoices.find((item) => item.default) ??
+      latinSpanishVoices[0] ??
+      (documentLanguage === "en"
+        ? languageVoices.find((item) => item.default) ?? languageVoices[0]
+        : undefined)
     );
   }
 
@@ -528,6 +543,17 @@ export function ReaderApp() {
       .normalize("NFD")
       .replace(/[\u0300-\u036f]/g, "")
       .toLowerCase();
+  }
+
+  function isLatinSpanishVoice(voice: SpeechSynthesisVoice) {
+    const lang = voice.lang.toLowerCase();
+    const name = normalizeVoiceName(voice.name);
+    if (lang === "es-mx" || lang === "es-us" || lang === "es-419") return true;
+    if (lang === "es-es") return false;
+    if (name.includes("dalia") || name.includes("mexico") || name.includes("mexican")) return true;
+    if (name.includes("estados unidos") || name.includes("united states")) return true;
+    if (name.includes("latin") || name.includes("latam") || name.includes("latino")) return true;
+    return lang.startsWith("es-");
   }
 
   function getSpeechWindow(fromWord: number) {
@@ -632,7 +658,7 @@ export function ReaderApp() {
     const utterance = new SpeechSynthesisUtterance(params.textToSpeak);
     const preferredSystemVoice = params.preferredSystemVoice;
     const utteranceLanguage =
-      preferredSystemVoice?.lang ?? (document?.detectedLanguage === "en" ? "en-GB" : "es-MX");
+      preferredSystemVoice?.lang ?? (document?.detectedLanguage === "en" ? "en-GB" : "es-US");
 
     if (preferredSystemVoice) utterance.voice = preferredSystemVoice;
     utterance.lang = utteranceLanguage;
@@ -684,7 +710,9 @@ export function ReaderApp() {
       params.statusMessage ??
         (preferredSystemVoice
           ? `Lectura iniciada con la voz del navegador: ${preferredSystemVoice.name}.`
-          : "Lectura iniciada con la voz predeterminada del navegador."),
+          : document?.detectedLanguage === "en"
+            ? "Lectura iniciada con la voz predeterminada del navegador."
+            : "Este navegador no expone Dalia ni una voz de español latino. Se usará su voz predeterminada.")
     );
   }
 

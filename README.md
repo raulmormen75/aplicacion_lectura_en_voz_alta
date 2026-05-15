@@ -17,7 +17,7 @@ La app usa únicamente la voz disponible en el navegador mediante `speechSynthes
 
 En Edge, cuando el navegador expone `Microsoft Dalia Online (Natural) - Spanish (Mexico)`, la app la prioriza para lecturas en español de México. Si esa voz no está disponible, usa la voz predeterminada compatible del navegador o del sistema.
 
-En Android, Edge puede no exponer Dalia a las páginas web aunque exista la función interna “Leer en voz alta”. La app espera brevemente a que el navegador publique sus voces y selecciona Dalia si aparece; si Android no la entrega mediante `speechSynthesis`, no se puede forzar desde una PWA.
+En Android, Edge puede no exponer Dalia a las páginas web aunque exista la función interna “Leer en voz alta”. La app espera brevemente a que el navegador publique sus voces y selecciona Dalia si aparece; si Android no la entrega mediante `speechSynthesis`, no se puede forzar desde una PWA. En ese caso, la app prefiere una voz de español latino antes que una de español de España cuando el navegador la ofrece.
 
 ## Variables de entorno
 
