@@ -609,11 +609,11 @@ button:focus-visible {
   bottom: auto;
   z-index: 20;
   display: grid;
-  grid-template-columns: auto minmax(220px, auto) minmax(0, 1fr) auto auto;
+  grid-template-columns: 1fr;
   align-items: center;
-  gap: 14px;
+  gap: 10px;
   max-width: 1480px;
-  min-height: 78px;
+  min-height: 0;
   margin: 18px auto 0;
   border: 1px solid rgba(242, 242, 238, 0.16);
   border-radius: 28px;
@@ -623,6 +623,28 @@ button:focus-visible {
   box-shadow: var(--shadow);
   padding: 14px;
   backdrop-filter: blur(20px);
+}
+
+.player-main-controls,
+.player-secondary-controls,
+.player-settings-row {
+  display: grid;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.player-main-controls {
+  grid-template-columns: minmax(166px, auto) minmax(0, 1fr);
+}
+
+.player-secondary-controls {
+  grid-template-columns: minmax(300px, 520px) minmax(0, 1fr);
+}
+
+.player-settings-row {
+  grid-template-columns: minmax(320px, auto) auto;
+  justify-content: end;
 }
 
 .has-document .player-dock {
@@ -713,7 +735,7 @@ button:focus-visible {
   min-width: 0;
   align-items: center;
   justify-content: center;
-  gap: 8px;
+  gap: 10px;
 }
 
 .transport button,
@@ -728,10 +750,11 @@ button:focus-visible {
   padding: 0 12px;
   font-size: 0.9rem;
   font-weight: 760;
+  white-space: nowrap;
 }
 
 .transport .play-button {
-  min-width: 140px;
+  min-width: 190px;
   border-color: rgba(198, 167, 94, 0.5);
   background: var(--gold);
   color: #130f08;
@@ -740,6 +763,7 @@ button:focus-visible {
 
 .speed-control {
   display: flex;
+  min-width: 0;
   padding: 4px;
   border-radius: 16px;
 }
@@ -1030,6 +1054,16 @@ button:focus-visible {
     grid-template-columns: 1fr;
   }
 
+  .player-main-controls,
+  .player-secondary-controls {
+    grid-template-columns: 1fr;
+  }
+
+  .player-settings-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+    justify-content: stretch;
+  }
+
   .transport {
     flex-wrap: wrap;
   }
@@ -1213,6 +1247,21 @@ button:focus-visible {
     padding: 12px;
   }
 
+  .player-main-controls,
+  .player-secondary-controls {
+    grid-template-columns: 1fr;
+    gap: 8px;
+  }
+
+  .player-settings-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px;
+  }
+
+  .time-pill {
+    justify-self: center;
+  }
+
   .player-dock {
     right: 10px;
     bottom: 10px;
@@ -1242,6 +1291,14 @@ button:focus-visible {
     padding: 0 4px;
     font-size: 0.72rem;
     white-space: nowrap;
+  }
+
+  .mobile-player-slot .player-settings-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .mobile-player-slot .reset-button {
+    width: auto;
   }
 
   .transport button {
@@ -1319,6 +1376,17 @@ button:focus-visible {
     border-radius: 20px;
   }
 
+  .player-main-controls,
+  .player-secondary-controls {
+    grid-template-columns: 1fr;
+    gap: 8px;
+  }
+
+  .player-settings-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px;
+  }
+
   .home-action {
     min-height: 58px;
   }
@@ -1356,6 +1424,14 @@ button:focus-visible {
   .focus-control-dock button {
     min-height: 30px;
     padding: 0 7px;
+  }
+
+  .mobile-player-slot .player-settings-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .mobile-player-slot .reset-button {
+    width: auto;
   }
 }
 

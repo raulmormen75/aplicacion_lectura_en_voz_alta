@@ -974,52 +974,58 @@ export function ReaderApp() {
         <div className="progress-strip" aria-hidden="true">
           <span style={{ width: `${percentage}%` }} />
         </div>
-        <div className="time-pill">
-          <span>{formatRemainingTime(remainingSeconds)} restantes</span>
-          <strong>{percentage}%</strong>
-        </div>
-        {renderTextNavigationControls("standard")}
-        <div className="transport">
-          <button type="button" onClick={() => seek(-10)} aria-label="Retroceder 10 segundos">
-            <ChevronLeft size={18} />
-            10 s
-          </button>
-          <button type="button" onClick={() => seek(-5)} aria-label="Retroceder 5 segundos">
-            <ChevronLeft size={18} />
-            5 s
-          </button>
-          <button className="play-button" type="button" onClick={togglePlayback}>
-            {isPlaying ? <Pause size={22} /> : <Play size={22} />}
-            {isPlaying ? "Pausar" : "Reproducir"}
-          </button>
-          <button type="button" onClick={() => seek(5)} aria-label="Adelantar 5 segundos">
-            5 s
-            <ChevronRight size={18} />
-          </button>
-          <button type="button" onClick={() => seek(10)} aria-label="Adelantar 10 segundos">
-            10 s
-            <ChevronRight size={18} />
-          </button>
-        </div>
-
-        <div className="speed-control" aria-label="Velocidad de lectura">
-          {([1, 0.85, 0.75, 0.5] as PlaybackRate[]).map((rate) => (
-            <button
-              key={rate}
-              type="button"
-              data-rate={rate}
-              className={preferences.rate === rate ? "active" : ""}
-              onClick={handleRateButtonClick}
-            >
-              {rate === 1 ? "Normal" : rate}
+        <div className="player-main-controls">
+          <div className="time-pill">
+            <span>{formatRemainingTime(remainingSeconds)} restantes</span>
+            <strong>{percentage}%</strong>
+          </div>
+          <div className="transport">
+            <button type="button" onClick={() => seek(-10)} aria-label="Retroceder 10 segundos">
+              <ChevronLeft size={18} />
+              10 s
             </button>
-          ))}
+            <button type="button" onClick={() => seek(-5)} aria-label="Retroceder 5 segundos">
+              <ChevronLeft size={18} />
+              5 s
+            </button>
+            <button className="play-button" type="button" onClick={togglePlayback}>
+              {isPlaying ? <Pause size={22} /> : <Play size={22} />}
+              {isPlaying ? "Pausar" : "Reproducir"}
+            </button>
+            <button type="button" onClick={() => seek(5)} aria-label="Adelantar 5 segundos">
+              5 s
+              <ChevronRight size={18} />
+            </button>
+            <button type="button" onClick={() => seek(10)} aria-label="Adelantar 10 segundos">
+              10 s
+              <ChevronRight size={18} />
+            </button>
+          </div>
         </div>
 
-        <button className="reset-button" type="button" onClick={resetReading}>
-          <RotateCcw size={18} />
-          Reiniciar
-        </button>
+        <div className="player-secondary-controls">
+          {renderTextNavigationControls("standard")}
+          <div className="player-settings-row">
+            <div className="speed-control" aria-label="Velocidad de lectura">
+              {([1, 0.85, 0.75, 0.5] as PlaybackRate[]).map((rate) => (
+                <button
+                  key={rate}
+                  type="button"
+                  data-rate={rate}
+                  className={preferences.rate === rate ? "active" : ""}
+                  onClick={handleRateButtonClick}
+                >
+                  {rate === 1 ? "Normal" : rate}
+                </button>
+              ))}
+            </div>
+
+            <button className="reset-button" type="button" onClick={resetReading}>
+              <RotateCcw size={18} />
+              Reiniciar
+            </button>
+          </div>
+        </div>
       </>
     );
   }
