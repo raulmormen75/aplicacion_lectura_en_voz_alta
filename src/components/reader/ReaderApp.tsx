@@ -12,6 +12,8 @@ import {
   Play,
   RotateCcw,
   ScanText,
+  SkipBack,
+  SkipForward,
   Sparkles,
   SunMedium,
   Type,
@@ -131,6 +133,10 @@ export function ReaderApp() {
     [document],
   );
   const currentWord = Math.min(state.progress.currentWord, document?.wordCount ?? 0);
+  const paragraphNavigationTargets = useMemo(() => {
+    const bodyBlocks = textBlocks.filter(isParagraphNavigationTarget);
+    return bodyBlocks.length ? bodyBlocks : textBlocks.filter((block) => block.wordCount > 0);
+  }, [textBlocks]);
   const visibleTextBlocks = useMemo(() => {
     if (!document || tokens.length === 0) return [];
 
@@ -758,6 +764,117 @@ export function ReaderApp() {
     }
   }
 
+  function getParagraphNavigationWord(direction: -1 | 1) {
+    if (!document || paragraphNavigationTargets.length === 0) return currentWord;
+
+    if (direction > 0) {
+      return (
+        paragraphNavigationTargets.find((target) => target.startWord > currentWord)?.startWord ??
+        currentWord
+      );
+    }
+
+    const currentTargetIndex = paragraphNavigationTargets.findIndex(
+      (target) =>
+        currentWord >= target.startWord && currentWord < target.startWord + target.wordCount,
+    );
+    const currentTarget =
+      currentTargetIndex >= 0 ? paragraphNavigationTargets[currentTargetIndex] : null;
+
+    if (currentTarget && currentWord > currentTarget.startWord + 2) {
+      return currentTarget.startWord;
+    }
+
+    const anchorWord = currentTarget?.startWord ?? currentWord;
+    return (
+      paragraphNavigationTargets
+        .filter((target) => target.startWord < anchorWord)
+        .at(-1)?.startWord ?? 0
+    );
+  }
+
+  function jumpToParagraph(direction: -1 | 1) {
+    if (!document) return;
+
+    const targetWord = getParagraphNavigationWord(direction);
+    if (targetWord === currentWord) return;
+
+    const wasPlaying = isPlaying;
+    const restartsCurrentParagraph =
+      direction < 0 &&
+      paragraphNavigationTargets.some(
+        (target) =>
+          target.startWord === targetWord &&
+          currentWord > target.startWord &&
+          currentWord < target.startWord + target.wordCount,
+      );
+    stopPlayback();
+    updateProgress(targetWord);
+    setIsPlaying(false);
+    setStatusMessage(
+      direction > 0
+        ? "Avanzaste al siguiente párrafo."
+        : restartsCurrentParagraph
+          ? "Volviste al inicio del párrafo actual."
+          : targetWord === 0
+            ? "Volviste al inicio de la lectura."
+            : "Retrocediste al párrafo anterior.",
+    );
+
+    if (wasPlaying) {
+      void startSpeech(targetWord);
+    }
+  }
+
+  function getLineNavigationWord(direction: -1 | 1) {
+    if (!document) return currentWord;
+
+    const readingPane =
+      activeWordRef.current?.closest(".document-text") ??
+      globalThis.document.querySelector(".document-text");
+    if (!readingPane) return getFallbackLineNavigationWord(direction);
+
+    const lineTargets = getRenderedLineTargets(readingPane);
+    if (lineTargets.length === 0) return getFallbackLineNavigationWord(direction);
+
+    const activeLineIndex = lineTargets.findIndex(
+      (line) => currentWord >= line.startWord && currentWord <= line.endWord,
+    );
+
+    if (activeLineIndex < 0) return getFallbackLineNavigationWord(direction);
+
+    const targetLine = lineTargets[activeLineIndex + direction];
+    return targetLine?.startWord ?? currentWord;
+  }
+
+  function getFallbackLineNavigationWord(direction: -1 | 1) {
+    if (!document) return currentWord;
+    const estimatedLineWords = 9;
+    return Math.max(
+      0,
+      Math.min(document.wordCount - 1, currentWord + estimatedLineWords * direction),
+    );
+  }
+
+  function jumpToLine(direction: -1 | 1) {
+    if (!document) return;
+
+    const targetWord = getLineNavigationWord(direction);
+    if (targetWord === currentWord) return;
+
+    const wasPlaying = isPlaying;
+    stopPlayback();
+    updateProgress(targetWord);
+    setIsPlaying(false);
+    setStatusMessage(
+      direction > 0 ? "Avanzaste una línea de texto." : "Retrocediste una línea de texto.",
+    );
+
+    if (wasPlaying) {
+      void startSpeech(targetWord);
+    }
+  }
+
   function changeRate(rate: PlaybackRate) {
     updatePreferences({ rate });
     setStatusMessage(`Velocidad actualizada a ${rate === 1 ? "Normal" : rate}.`);
@@ -861,6 +978,7 @@ export function ReaderApp() {
           <span>{formatRemainingTime(remainingSeconds)} restantes</span>
           <strong>{percentage}%</strong>
         </div>
+        {renderTextNavigationControls("standard")}
         <div className="transport">
           <button type="button" onClick={() => seek(-10)} aria-label="Retroceder 10 segundos">
             <ChevronLeft size={18} />
@@ -913,6 +1031,8 @@ export function ReaderApp() {
           <span>{formatRemainingTime(remainingSeconds)} restantes</span>
           <strong>{percentage}%</strong>
         </div>
+
+        {renderTextNavigationControls("focus")}
 
         <div className="focus-transport" aria-label="Reproducción">
           <button type="button" onClick={() => seek(-10)} aria-label="Retroceder 10 segundos">
@@ -970,6 +1090,56 @@ export function ReaderApp() {
           Salir
         </button>
       </aside>
+    );
+  }
+
+  function renderTextNavigationControls(variant: "standard" | "focus") {
+    const previousWord = getParagraphNavigationWord(-1);
+    const nextWord = getParagraphNavigationWord(1);
+    const previousDisabled = !document || previousWord === currentWord;
+    const nextDisabled = !document || nextWord === currentWord;
+    const className = variant === "focus" ? "focus-text-nav" : "text-nav";
+    const iconSize = variant === "focus" ? 14 : 16;
+
+    return (
+      <div className={className} aria-label="Navegación por texto">
+        <button
+          type="button"
+          onClick={() => jumpToParagraph(-1)}
+          disabled={previousDisabled}
+          aria-label="Párrafo anterior"
+        >
+          <SkipBack size={iconSize} />
+          <span>Párrafo</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => jumpToLine(-1)}
+          disabled={!document}
+          aria-label="Línea anterior"
+        >
+          <ChevronLeft size={iconSize} />
+          <span>Línea</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => jumpToLine(1)}
+          disabled={!document}
+          aria-label="Siguiente línea"
+        >
+          <span>Línea</span>
+          <ChevronRight size={iconSize} />
+        </button>
+        <button
+          type="button"
+          onClick={() => jumpToParagraph(1)}
+          disabled={nextDisabled}
+          aria-label="Siguiente párrafo"
+        >
+          <span>Párrafo</span>
+          <SkipForward size={iconSize} />
+        </button>
+      </div>
     );
   }
 
@@ -1220,6 +1390,68 @@ function getDocumentBlocks(document: ReaderDocument | null): TextBlock[] {
   return segmentTextBlocks(document.cleanText);
 }
 
+function isParagraphNavigationTarget(block: TextBlock) {
+  return block.wordCount > 0 && (block.kind === "paragraph" || block.kind === "bullet");
+}
+
+function getRenderedLineTargets(readingPane: Element) {
+  const renderedWords = Array.from(
+    readingPane.querySelectorAll<HTMLSpanElement>(".word[data-word-index]"),
+  )
+    .map((element) => {
+      const wordIndex = Number(element.dataset.wordIndex);
+      const rect = element.getBoundingClientRect();
+      return {
+        wordIndex,
+        left: rect.left,
+        top: rect.top,
+        height: rect.height,
+      };
+    })
+    .filter(
+      (word) =>
+        Number.isFinite(word.wordIndex) &&
+        word.height > 0 &&
+        Number.isFinite(word.left) &&
+        Number.isFinite(word.top),
+    )
+    .sort((a, b) => a.top - b.top || a.left - b.left);
+
+  const lines: Array<{
+    top: number;
+    tolerance: number;
+    words: typeof renderedWords;
+  }> = [];
+
+  for (const word of renderedWords) {
+    const tolerance = Math.max(6, word.height * 0.52);
+    const existingLine = lines.find((line) => Math.abs(line.top - word.top) <= line.tolerance);
+
+    if (existingLine) {
+      existingLine.words.push(word);
+      existingLine.top = (existingLine.top + word.top) / 2;
+      existingLine.tolerance = Math.max(existingLine.tolerance, tolerance);
+      continue;
+    }
+
+    lines.push({
+      top: word.top,
+      tolerance,
+      words: [word],
+    });
+  }
+
+  return lines
+    .map((line) => {
+      const sortedWords = line.words.sort((a, b) => a.left - b.left);
+      return {
+        startWord: Math.min(...sortedWords.map((word) => word.wordIndex)),
+        endWord: Math.max(...sortedWords.map((word) => word.wordIndex)),
+      };
+    })
+    .sort((a, b) => a.startWord - b.startWord);
+}
+
 function createVisibleTextParts(params: {
   block: TextBlock;
   cleanText: string;
@@ -1275,6 +1507,7 @@ function renderStructuredTextBlock(
         key={part.id}
         ref={part.wordIndex === currentWord ? activeWordRef : undefined}
         className={part.wordIndex === currentWord ? "word active-word" : "word"}
+        data-word-index={part.wordIndex}
       >
         {part.text}
       </span>
