@@ -650,7 +650,7 @@ button:focus-visible {
 }
 
 .player-action-row {
-  grid-template-columns: minmax(560px, auto) minmax(300px, 430px) auto;
+  grid-template-columns: minmax(560px, auto) auto auto;
   justify-content: center;
 }
 
@@ -852,7 +852,8 @@ button:focus-visible {
 .speed-control {
   display: flex;
   min-width: 0;
-  max-width: 430px;
+  width: max-content;
+  max-width: none;
   padding: 4px;
   border-radius: 16px;
 }
@@ -1233,7 +1234,7 @@ button:focus-visible {
   }
 
   .speed-control {
-    width: 100%;
+    width: max-content;
     max-width: none;
   }
 
@@ -1433,7 +1434,8 @@ button:focus-visible {
   }
 
   .player-action-row {
-    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-columns: max-content auto;
+    justify-content: center;
   }
 
   .player-action-row .transport {
@@ -1521,7 +1523,8 @@ button:focus-visible {
 
   .speed-control button {
     min-width: 0;
-    flex: 1;
+    width: 72px;
+    flex: 0 0 auto;
   }
 
 }
@@ -1592,7 +1595,8 @@ button:focus-visible {
   }
 
   .player-action-row {
-    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-columns: max-content auto;
+    justify-content: center;
   }
 
   .player-action-row .transport {
@@ -1648,7 +1652,7 @@ button:focus-visible {
   }
 
   .mobile-player-slot .reset-button {
-    width: auto;
+    width: 48px;
   }
 }
 
