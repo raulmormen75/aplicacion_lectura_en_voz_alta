@@ -36,6 +36,8 @@ import {
   loadReaderState,
   saveReaderState,
 } from "@/lib/reader/storage";
+import { synthesizePiperSpeech } from "@/lib/reader/piper";
+import type { PiperStage, PiperStatusUpdate } from "@/lib/reader/piper";
 import type {
   PlaybackRate,
   ReaderDocument,
@@ -67,12 +69,40 @@ type VisibleTextBlock = {
   parts: VisibleTextPart[];
 };
 
+type VoiceStartupState = {
+  visible: boolean;
+  status: PiperStage;
+  message: string;
+  detail?: string;
+  progress?: number;
+};
+
+type VoiceModelId = "browser-standard" | "piper-updated";
+
 const SAMPLE_TEXT =
   "La lectura científica exige atención, ritmo y continuidad. Esta aplicación convierte documentos largos en una experiencia auditiva clara, con avance guardado, resaltado visual y controles diseñados para retomar el contenido sin perder el hilo.";
 const MAX_CLIENT_UPLOAD_BYTES = 25 * 1024 * 1024;
 const VOICE_LOAD_TIMEOUT_MS = 900;
 const READER_WINDOW_BEFORE = 90;
 const READER_WINDOW_AFTER = 180;
+const STANDARD_VOICE_MODEL_ID: VoiceModelId = "browser-standard";
+const PIPER_VOICE_MODEL_ID: VoiceModelId = "piper-updated";
+const VOICE_MODELS: Array<{
+  id: VoiceModelId;
+  label: string;
+  description: string;
+}> = [
+  {
+    id: STANDARD_VOICE_MODEL_ID,
+    label: "Voz estándar",
+    description: "Usa la voz disponible en este navegador.",
+  },
+  {
+    id: PIPER_VOICE_MODEL_ID,
+    label: "Voz actualizada",
+    description: "Usa Piper local con respaldo automático.",
+  },
+];
 
 export function ReaderApp() {
   const [state, setState] = useState<StoredReaderState>(DEFAULT_READER_STATE);
@@ -84,6 +114,8 @@ export function ReaderApp() {
   const [focusControlsVisible, setFocusControlsVisible] = useState(true);
   const [statusMessage, setStatusMessage] = useState("Avance guardado en este dispositivo.");
   const [systemVoices, setSystemVoices] = useState<SpeechSynthesisVoice[]>([]);
+  const [voiceStartup, setVoiceStartup] = useState<VoiceStartupState | null>(null);
+  const [isVoiceMenuOpen, setIsVoiceMenuOpen] = useState(false);
   const [integrations, setIntegrations] = useState<IntegrationsStatus>({
     gptOssReady: false,
   });
@@ -100,9 +132,13 @@ export function ReaderApp() {
   const shouldContinuePlaybackRef = useRef(false);
   const progressWordRef = useRef(0);
   const boundarySeenRef = useRef(false);
+  const piperAudioRef = useRef<HTMLAudioElement | null>(null);
+  const piperAudioUrlRef = useRef<string | null>(null);
 
   const document = state.document;
   const preferences = state.preferences;
+  const selectedVoiceModel: VoiceModelId =
+    preferences.voiceId === PIPER_VOICE_MODEL_ID ? PIPER_VOICE_MODEL_ID : STANDARD_VOICE_MODEL_ID;
   const shouldShowTextReview =
     document?.quality.status !== "ready" && document?.quality.ocrAvailable === true;
 
@@ -113,15 +149,27 @@ export function ReaderApp() {
     }
   }, []);
 
+  const stopPiperAudio = useCallback(() => {
+    piperAudioRef.current?.pause();
+    piperAudioRef.current = null;
+
+    if (piperAudioUrlRef.current) {
+      URL.revokeObjectURL(piperAudioUrlRef.current);
+      piperAudioUrlRef.current = null;
+    }
+  }, []);
+
   const stopPlayback = useCallback(
     (advanceSession = true) => {
       shouldContinuePlaybackRef.current = false;
       if (advanceSession) playbackSessionRef.current += 1;
       window.speechSynthesis?.cancel();
+      stopPiperAudio();
       clearProgressTimer();
       activeSegmentRef.current = null;
+      setVoiceStartup(null);
     },
-    [clearProgressTimer],
+    [clearProgressTimer, stopPiperAudio],
   );
 
   const tokens = useMemo(
@@ -188,9 +236,10 @@ export function ReaderApp() {
 
     return () => {
       window.speechSynthesis?.removeEventListener?.("voiceschanged", refreshVoices);
+      stopPiperAudio();
       stopPlayback();
     };
-  }, [stopPlayback]);
+  }, [stopPiperAudio, stopPlayback]);
 
   useEffect(() => {
     let revealTimer: number | null = null;
@@ -636,6 +685,17 @@ export function ReaderApp() {
     }
 
     updateProgress(speechBaseWord);
+    if (selectedVoiceModel === PIPER_VOICE_MODEL_ID) {
+      await startPiperSpeech({
+        textToSpeak,
+        speechBaseWord,
+        chunkEndWord,
+        activeSession,
+        rate,
+      });
+      return;
+    }
+
     setIsPlaying(true);
     setStatusMessage("Buscando la mejor voz disponible en este navegador.");
     const availableVoices = await waitForSpeechVoices();
@@ -722,14 +782,206 @@ export function ReaderApp() {
     );
   }
 
+  async function startPiperSpeech(params: {
+    textToSpeak: string;
+    speechBaseWord: number;
+    chunkEndWord: number;
+    activeSession: number;
+    rate: PlaybackRate;
+  }) {
+    window.speechSynthesis?.cancel();
+    stopPiperAudio();
+    setIsPlaying(false);
+    setStatusMessage("Preparando voz actualizada.");
+    updateVoiceStartupStatus({
+      stage: "preparing",
+      message: "Preparando voz actualizada",
+      detail: "La voz local se inicia en este navegador antes de comenzar la lectura.",
+    });
+
+    try {
+      console.info("[Piper TTS] Inicio de lectura", {
+        documentId: document?.id,
+        title: document?.title,
+        fromWord: params.speechBaseWord,
+        words: countWords(params.textToSpeak),
+      });
+
+      const result = await synthesizePiperSpeech({
+        text: params.textToSpeak,
+        onStatus: updateVoiceStartupStatus,
+      });
+
+      if (playbackSessionRef.current !== params.activeSession) return;
+
+      console.info("[Piper TTS] Audio generado", {
+        engine: "piper",
+        initMs: Math.round(result.initMs),
+        generationMs: Math.round(result.generationMs),
+        bytes: result.audio.size,
+      });
+
+      updateVoiceStartupStatus({
+        stage: "playing",
+        message: "Voz actualizada lista",
+        detail: "Iniciando lectura.",
+      });
+      await startPiperAudioPlayback(params, result.audio);
+    } catch (error) {
+      await fallbackToBrowserVoice(params, error);
+    }
+  }
+
+  async function startPiperAudioPlayback(
+    params: {
+      textToSpeak: string;
+      speechBaseWord: number;
+      chunkEndWord: number;
+      activeSession: number;
+      rate: PlaybackRate;
+    },
+    audioBlob: Blob,
+  ) {
+    stopPiperAudio();
+    const audioUrl = URL.createObjectURL(audioBlob);
+    const audio = new Audio(audioUrl);
+    audio.playbackRate = params.rate;
+    piperAudioUrlRef.current = audioUrl;
+    piperAudioRef.current = audio;
+    utteranceRef.current = null;
+    boundarySeenRef.current = false;
+    activeSegmentRef.current = {
+      startWord: params.speechBaseWord,
+      endWord: params.chunkEndWord,
+      rate: params.rate,
+    };
+
+    const cleanup = () => {
+      if (piperAudioRef.current === audio) piperAudioRef.current = null;
+      if (piperAudioUrlRef.current === audioUrl) {
+        URL.revokeObjectURL(audioUrl);
+        piperAudioUrlRef.current = null;
+      }
+    };
+
+    audio.onended = () => {
+      cleanup();
+      clearProgressTimer();
+      if (playbackSessionRef.current !== params.activeSession) return;
+
+      updateProgress(Math.max(progressWordRef.current, params.chunkEndWord));
+
+      if (shouldContinuePlaybackRef.current && document && params.chunkEndWord < document.wordCount) {
+        void startSpeech(params.chunkEndWord, params.activeSession, params.rate);
+        return;
+      }
+
+      setIsPlaying(false);
+      setStatusMessage("Lectura terminada. Tu avance quedÃ³ guardado.");
+    };
+
+    audio.onerror = () => {
+      cleanup();
+      clearProgressTimer();
+      if (playbackSessionRef.current !== params.activeSession) return;
+      void fallbackToBrowserVoice(
+        params,
+        new Error("El navegador no pudo reproducir el audio generado por Piper."),
+      );
+    };
+
+    updateProgress(params.speechBaseWord);
+    startProgressTimer(params.speechBaseWord, params.chunkEndWord, params.rate);
+    await audio.play();
+    setVoiceStartup(null);
+    setIsPlaying(true);
+    setStatusMessage("Lectura iniciada con Voz actualizada.");
+  }
+
+  async function fallbackToBrowserVoice(
+    params: {
+      textToSpeak: string;
+      speechBaseWord: number;
+      chunkEndWord: number;
+      activeSession: number;
+      rate: PlaybackRate;
+    },
+    cause: unknown,
+  ) {
+    if (playbackSessionRef.current !== params.activeSession) return;
+
+    const errorMessage = cause instanceof Error ? cause.message : String(cause);
+    console.warn("[Piper TTS] Error, usando voz estándar", {
+      engine: "speechSynthesis",
+      error: errorMessage,
+    });
+
+    updateVoiceStartupStatus({
+      stage: "fallback",
+      message: "Error, usando voz estándar",
+      detail: errorMessage,
+    });
+
+    const availableVoices = await waitForSpeechVoices();
+    if (playbackSessionRef.current !== params.activeSession) return;
+
+    setVoiceStartup(null);
+    const preferredSystemVoice = getPreferredSystemVoice(availableVoices);
+    startBrowserSpeech({
+      ...params,
+      preferredSystemVoice,
+      statusMessage: "La Voz actualizada no pudo iniciar. Se usó Voz estándar.",
+    });
+  }
+
+  function updateVoiceStartupStatus(update: PiperStatusUpdate) {
+    console.info("[Piper TTS] Estado", update);
+    setVoiceStartup({
+      visible: true,
+      status: update.stage,
+      message: update.message,
+      detail: update.detail,
+      progress: update.progress,
+    });
+  }
+
   function togglePlayback() {
     if (!document) return;
 
     if (isPlaying) {
-      window.speechSynthesis.pause();
+      if (piperAudioRef.current && !piperAudioRef.current.paused) {
+        piperAudioRef.current.pause();
+      } else {
+        window.speechSynthesis.pause();
+      }
       clearProgressTimer();
       setIsPlaying(false);
       setStatusMessage("Lectura pausada. Avance guardado.");
+      return;
+    }
+
+    if (piperAudioRef.current?.paused && !piperAudioRef.current.ended) {
+      shouldContinuePlaybackRef.current = true;
+      void piperAudioRef.current
+        .play()
+        .then(() => {
+          const activeSegment = activeSegmentRef.current;
+          startProgressTimer(
+            currentWord,
+            Math.min(activeSegment?.endWord ?? document.wordCount, document.wordCount),
+            activeSegment?.rate ?? preferences.rate,
+          );
+          setIsPlaying(true);
+          setStatusMessage("Lectura reanudada con Voz actualizada.");
+        })
+        .catch((error: unknown) => {
+          setIsPlaying(false);
+          setStatusMessage(
+            error instanceof Error
+              ? `No se pudo reanudar la Voz actualizada: ${error.message}`
+              : "No se pudo reanudar la Voz actualizada.",
+          );
+        });
       return;
     }
 
@@ -900,6 +1152,16 @@ export function ReaderApp() {
     });
   }
 
+  function changeVoiceModel(modelId: VoiceModelId) {
+    updatePreferences({ voiceId: modelId });
+    setIsVoiceMenuOpen(false);
+    setStatusMessage(
+      modelId === PIPER_VOICE_MODEL_ID
+        ? "Voz actualizada seleccionada. Si no inicia, se usará Voz estándar."
+        : "Voz estándar seleccionada.",
+    );
+  }
+
   function resetReading() {
     stopPlayback();
     setIsPlaying(false);
@@ -975,37 +1237,41 @@ export function ReaderApp() {
           <span style={{ width: `${percentage}%` }} />
         </div>
         <div className="player-main-controls">
-          <div className="time-pill">
-            <span>{formatRemainingTime(remainingSeconds)} restantes</span>
-            <strong>{percentage}%</strong>
+          <div className="player-info-nav-row">
+            <div className="player-readout-row">
+              <div className="time-pill">
+                <span>{formatRemainingTime(remainingSeconds)} restantes</span>
+                <strong>{percentage}%</strong>
+              </div>
+              {renderVoiceModelSelector()}
+            </div>
+            {renderTextNavigationControls("standard")}
           </div>
-          <div className="transport">
-            <button type="button" onClick={() => seek(-10)} aria-label="Retroceder 10 segundos">
-              <ChevronLeft size={18} />
-              10 s
-            </button>
-            <button type="button" onClick={() => seek(-5)} aria-label="Retroceder 5 segundos">
-              <ChevronLeft size={18} />
-              5 s
-            </button>
-            <button className="play-button" type="button" onClick={togglePlayback}>
-              {isPlaying ? <Pause size={22} /> : <Play size={22} />}
-              {isPlaying ? "Pausar" : "Reproducir"}
-            </button>
-            <button type="button" onClick={() => seek(5)} aria-label="Adelantar 5 segundos">
-              5 s
-              <ChevronRight size={18} />
-            </button>
-            <button type="button" onClick={() => seek(10)} aria-label="Adelantar 10 segundos">
-              10 s
-              <ChevronRight size={18} />
-            </button>
-          </div>
-        </div>
 
-        <div className="player-secondary-controls">
-          {renderTextNavigationControls("standard")}
-          <div className="player-settings-row">
+          <div className="player-action-row">
+            <div className="transport">
+              <button type="button" onClick={() => seek(-10)} aria-label="Retroceder 10 segundos">
+                <ChevronLeft size={18} />
+                10 s
+              </button>
+              <button type="button" onClick={() => seek(-5)} aria-label="Retroceder 5 segundos">
+                <ChevronLeft size={18} />
+                5 s
+              </button>
+              <button className="play-button" type="button" onClick={togglePlayback}>
+                {isPlaying ? <Pause size={22} /> : <Play size={22} />}
+                {isPlaying ? "Pausar" : "Reproducir"}
+              </button>
+              <button type="button" onClick={() => seek(5)} aria-label="Adelantar 5 segundos">
+                5 s
+                <ChevronRight size={18} />
+              </button>
+              <button type="button" onClick={() => seek(10)} aria-label="Adelantar 10 segundos">
+                10 s
+                <ChevronRight size={18} />
+              </button>
+            </div>
+
             <div className="speed-control" aria-label="Velocidad de lectura">
               {([1, 0.85, 0.75, 0.5] as PlaybackRate[]).map((rate) => (
                 <button
@@ -1022,11 +1288,78 @@ export function ReaderApp() {
 
             <button className="reset-button" type="button" onClick={resetReading}>
               <RotateCcw size={18} />
-              Reiniciar
+              <span>Reiniciar</span>
             </button>
           </div>
         </div>
       </>
+    );
+  }
+
+  function renderVoiceModelSelector() {
+    const activeModel =
+      VOICE_MODELS.find((model) => model.id === selectedVoiceModel) ?? VOICE_MODELS[0];
+
+    return (
+      <div className="voice-model-selector">
+        <button
+          className="voice-model-button"
+          type="button"
+          aria-haspopup="menu"
+          aria-expanded={isVoiceMenuOpen}
+          aria-label="Cambiar modelo de voz"
+          title="Cambiar modelo de voz"
+          onClick={() => setIsVoiceMenuOpen((isOpen) => !isOpen)}
+        >
+          <SpeakingLipsIcon size={19} />
+          <span>{activeModel.label}</span>
+        </button>
+
+        {isVoiceMenuOpen ? (
+          <div className="voice-model-menu" role="menu">
+            {VOICE_MODELS.map((model) => (
+              <button
+                key={model.id}
+                type="button"
+                role="menuitemradio"
+                aria-checked={selectedVoiceModel === model.id}
+                className={selectedVoiceModel === model.id ? "active" : ""}
+                onClick={() => changeVoiceModel(model.id)}
+              >
+                <span>{model.label}</span>
+                <small>{model.description}</small>
+              </button>
+            ))}
+          </div>
+        ) : null}
+      </div>
+    );
+  }
+
+  function renderVoiceStartupOverlay() {
+    if (!voiceStartup?.visible) return null;
+
+    return (
+      <div className="voice-startup-overlay" role="status" aria-live="polite">
+        <div className="voice-startup-modal" data-voice-status={voiceStartup.status}>
+          <div className="voice-startup-icon" aria-hidden="true">
+            <SpeakingLipsIcon size={24} />
+          </div>
+          <div>
+            <p className="tool-title">Modelo de voz</p>
+            <h2>{voiceStartup.message}</h2>
+          </div>
+          {voiceStartup.detail ? <p>{voiceStartup.detail}</p> : null}
+          {typeof voiceStartup.progress === "number" ? (
+            <div
+              className="voice-startup-progress"
+              aria-label={`Descarga ${voiceStartup.progress}%`}
+            >
+              <span style={{ width: `${voiceStartup.progress}%` }} />
+            </div>
+          ) : null}
+        </div>
+      </div>
     );
   }
 
@@ -1385,8 +1718,50 @@ export function ReaderApp() {
         {renderPlayerControls()}
       </footer>
 
+      {renderVoiceStartupOverlay()}
+
       {preferences.readingMode === "focus" && focusControlsVisible ? renderFocusControls() : null}
     </main>
+  );
+}
+
+function SpeakingLipsIcon({ size = 20 }: { size?: number }) {
+  return (
+    <svg
+      aria-hidden="true"
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      xmlns="http://www.w3.org/2000/svg"
+    >
+      <path
+        d="M3.75 11.25c1.32-1.9 2.72-2.85 4.2-2.85 1.12 0 1.82.44 2.44.83.53.33 1 .62 1.61.62s1.08-.29 1.61-.62c.62-.39 1.32-.83 2.44-.83 1.48 0 2.88.95 4.2 2.85"
+        stroke="currentColor"
+        strokeWidth="1.7"
+        strokeLinecap="round"
+      />
+      <path
+        d="M3.75 12.15c1.65 2.25 4.18 3.45 8.25 3.45s6.6-1.2 8.25-3.45c-1.78-.42-3.15-.34-4.46.08-1.29.42-2.25 1.02-3.79 1.02s-2.5-.6-3.79-1.02c-1.31-.42-2.68-.5-4.46-.08Z"
+        stroke="currentColor"
+        strokeWidth="1.7"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M12 9.85v3.4"
+        stroke="currentColor"
+        strokeWidth="1.25"
+        strokeLinecap="round"
+        opacity="0.7"
+      />
+      <path
+        d="M20.2 7.2c.7.58 1.16 1.32 1.38 2.22M21.95 5.35c1.08.92 1.75 2.07 2 3.46"
+        stroke="currentColor"
+        strokeWidth="1.35"
+        strokeLinecap="round"
+      />
+    </svg>
   );
 }
 

@@ -13,11 +13,13 @@
   },
   "dependencies": {
     "@mozilla/readability": "^0.6.0",
+    "@realtimex/piper-tts-web": "^1.1.1",
     "jsdom": "^29.1.1",
     "lucide-react": "^1.14.0",
     "mammoth": "^1.12.0",
     "next": "16.2.4",
     "next-auth": "^4.24.14",
+    "onnxruntime-web": "^1.22.0",
     "pdfjs-dist": "^5.7.284",
     "react": "19.2.4",
     "react-dom": "19.2.4",
