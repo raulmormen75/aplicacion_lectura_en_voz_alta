@@ -20,7 +20,7 @@ import {
 } from "lucide-react";
 import Image from "next/image";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { ChangeEvent, MouseEvent, RefObject } from "react";
+import type { ChangeEvent, MouseEvent } from "react";
 import {
   calculatePercentage,
   cleanTextWithoutInventing,
@@ -127,6 +127,7 @@ export function ReaderApp() {
     rate: PlaybackRate;
   } | null>(null);
   const intervalRef = useRef<number | null>(null);
+  const piperProgressFrameRef = useRef<number | null>(null);
   const activeWordRef = useRef<HTMLSpanElement | null>(null);
   const playbackSessionRef = useRef(0);
   const shouldContinuePlaybackRef = useRef(false);
@@ -139,6 +140,7 @@ export function ReaderApp() {
   const preferences = state.preferences;
   const selectedVoiceModel: VoiceModelId =
     preferences.voiceId === PIPER_VOICE_MODEL_ID ? PIPER_VOICE_MODEL_ID : STANDARD_VOICE_MODEL_ID;
+  const selectedVoiceModelRef = useRef<VoiceModelId>(selectedVoiceModel);
   const shouldShowTextReview =
     document?.quality.status !== "ready" && document?.quality.ocrAvailable === true;
 
@@ -149,7 +151,15 @@ export function ReaderApp() {
     }
   }, []);
 
+  const clearPiperProgressTracker = useCallback(() => {
+    if (piperProgressFrameRef.current) {
+      window.cancelAnimationFrame(piperProgressFrameRef.current);
+      piperProgressFrameRef.current = null;
+    }
+  }, []);
+
   const stopPiperAudio = useCallback(() => {
+    clearPiperProgressTracker();
     piperAudioRef.current?.pause();
     piperAudioRef.current = null;
 
@@ -157,7 +167,7 @@ export function ReaderApp() {
       URL.revokeObjectURL(piperAudioUrlRef.current);
       piperAudioUrlRef.current = null;
     }
-  }, []);
+  }, [clearPiperProgressTracker]);
 
   const stopPlayback = useCallback(
     (advanceSession = true) => {
@@ -242,6 +252,10 @@ export function ReaderApp() {
   }, [stopPiperAudio, stopPlayback]);
 
   useEffect(() => {
+    selectedVoiceModelRef.current = selectedVoiceModel;
+  }, [selectedVoiceModel]);
+
+  useEffect(() => {
     let revealTimer: number | null = null;
 
     if (preferences.readingMode !== "focus") {
@@ -262,7 +276,10 @@ export function ReaderApp() {
   }, [currentWord]);
 
   useEffect(() => {
-    const activeWord = activeWordRef.current;
+    const activeWord = globalThis.document.querySelector<HTMLSpanElement>(
+      ".document-text .active-word",
+    );
+    activeWordRef.current = activeWord;
     if (!activeWord) return;
 
     const readingPane = activeWord.closest(".document-text") as HTMLElement | null;
@@ -657,7 +674,47 @@ export function ReaderApp() {
     }, intervalMs);
   }
 
-  async function startSpeech(fromWord = currentWord, sessionId?: number, rate = preferences.rate) {
+  function startPiperProgressTracker(
+    audio: HTMLAudioElement,
+    startWord: number,
+    endWord: number,
+    activeSession: number,
+  ) {
+    clearProgressTimer();
+    clearPiperProgressTracker();
+    const totalWords = Math.max(1, endWord - startWord);
+
+    const tick = () => {
+      if (
+        playbackSessionRef.current !== activeSession ||
+        piperAudioRef.current !== audio ||
+        audio.paused ||
+        audio.ended
+      ) {
+        return;
+      }
+
+      const hasDuration = Number.isFinite(audio.duration) && audio.duration > 0;
+      if (hasDuration) {
+        const ratio = Math.max(0, Math.min(1, audio.currentTime / audio.duration));
+        const nextWord = Math.min(endWord, startWord + Math.floor(totalWords * ratio));
+        if (nextWord > progressWordRef.current) {
+          updateProgress(nextWord);
+        }
+      }
+
+      piperProgressFrameRef.current = window.requestAnimationFrame(tick);
+    };
+
+    piperProgressFrameRef.current = window.requestAnimationFrame(tick);
+  }
+
+  async function startSpeech(
+    fromWord = currentWord,
+    sessionId?: number,
+    rate = preferences.rate,
+    voiceModel = selectedVoiceModelRef.current,
+  ) {
     if (!document) return;
 
     const activeSession = sessionId ?? playbackSessionRef.current + 1;
@@ -667,6 +724,7 @@ export function ReaderApp() {
     if (!sessionId) {
       window.speechSynthesis?.cancel();
       clearProgressTimer();
+      clearPiperProgressTracker();
     }
 
     const speechWindow = getSpeechWindow(fromWord);
@@ -680,18 +738,19 @@ export function ReaderApp() {
     const { textToSpeak, speechBaseWord, chunkEndWord } = speechWindow;
 
     if (!textToSpeak) {
-      void startSpeech(chunkEndWord, activeSession, rate);
+      void startSpeech(chunkEndWord, activeSession, rate, voiceModel);
       return;
     }
 
     updateProgress(speechBaseWord);
-    if (selectedVoiceModel === PIPER_VOICE_MODEL_ID) {
+    if (voiceModel === PIPER_VOICE_MODEL_ID) {
       await startPiperSpeech({
         textToSpeak,
         speechBaseWord,
         chunkEndWord,
         activeSession,
         rate,
+        voiceModel,
       });
       return;
     }
@@ -708,6 +767,7 @@ export function ReaderApp() {
       chunkEndWord,
       activeSession,
       rate,
+      voiceModel,
       preferredSystemVoice,
     });
   }
@@ -718,6 +778,7 @@ export function ReaderApp() {
     chunkEndWord: number;
     activeSession: number;
     rate: PlaybackRate;
+    voiceModel: VoiceModelId;
     preferredSystemVoice?: SpeechSynthesisVoice;
     statusMessage?: string;
   }) {
@@ -752,7 +813,12 @@ export function ReaderApp() {
       updateProgress(Math.max(progressWordRef.current, params.chunkEndWord));
 
       if (shouldContinuePlaybackRef.current && document && params.chunkEndWord < document.wordCount) {
-        void startSpeech(params.chunkEndWord, params.activeSession, params.rate);
+        void startSpeech(
+          params.chunkEndWord,
+          params.activeSession,
+          params.rate,
+          params.voiceModel,
+        );
         return;
       }
 
@@ -788,6 +854,7 @@ export function ReaderApp() {
     chunkEndWord: number;
     activeSession: number;
     rate: PlaybackRate;
+    voiceModel: VoiceModelId;
   }) {
     window.speechSynthesis?.cancel();
     stopPiperAudio();
@@ -839,6 +906,7 @@ export function ReaderApp() {
       chunkEndWord: number;
       activeSession: number;
       rate: PlaybackRate;
+      voiceModel: VoiceModelId;
     },
     audioBlob: Blob,
   ) {
@@ -867,12 +935,18 @@ export function ReaderApp() {
     audio.onended = () => {
       cleanup();
       clearProgressTimer();
+      clearPiperProgressTracker();
       if (playbackSessionRef.current !== params.activeSession) return;
 
       updateProgress(Math.max(progressWordRef.current, params.chunkEndWord));
 
       if (shouldContinuePlaybackRef.current && document && params.chunkEndWord < document.wordCount) {
-        void startSpeech(params.chunkEndWord, params.activeSession, params.rate);
+        void startSpeech(
+          params.chunkEndWord,
+          params.activeSession,
+          params.rate,
+          params.voiceModel,
+        );
         return;
       }
 
@@ -883,6 +957,7 @@ export function ReaderApp() {
     audio.onerror = () => {
       cleanup();
       clearProgressTimer();
+      clearPiperProgressTracker();
       if (playbackSessionRef.current !== params.activeSession) return;
       void fallbackToBrowserVoice(
         params,
@@ -891,8 +966,13 @@ export function ReaderApp() {
     };
 
     updateProgress(params.speechBaseWord);
-    startProgressTimer(params.speechBaseWord, params.chunkEndWord, params.rate);
     await audio.play();
+    startPiperProgressTracker(
+      audio,
+      params.speechBaseWord,
+      params.chunkEndWord,
+      params.activeSession,
+    );
     setVoiceStartup(null);
     setIsPlaying(true);
     setStatusMessage("Lectura iniciada con Voz actualizada.");
@@ -905,6 +985,7 @@ export function ReaderApp() {
       chunkEndWord: number;
       activeSession: number;
       rate: PlaybackRate;
+      voiceModel: VoiceModelId;
     },
     cause: unknown,
   ) {
@@ -929,6 +1010,7 @@ export function ReaderApp() {
     const preferredSystemVoice = getPreferredSystemVoice(availableVoices);
     startBrowserSpeech({
       ...params,
+      voiceModel: STANDARD_VOICE_MODEL_ID,
       preferredSystemVoice,
       statusMessage: "La Voz actualizada no pudo iniciar. Se usó Voz estándar.",
     });
@@ -951,6 +1033,7 @@ export function ReaderApp() {
     if (isPlaying) {
       if (piperAudioRef.current && !piperAudioRef.current.paused) {
         piperAudioRef.current.pause();
+        clearPiperProgressTracker();
       } else {
         window.speechSynthesis.pause();
       }
@@ -961,28 +1044,33 @@ export function ReaderApp() {
     }
 
     if (piperAudioRef.current?.paused && !piperAudioRef.current.ended) {
-      shouldContinuePlaybackRef.current = true;
-      void piperAudioRef.current
-        .play()
-        .then(() => {
-          const activeSegment = activeSegmentRef.current;
-          startProgressTimer(
-            currentWord,
-            Math.min(activeSegment?.endWord ?? document.wordCount, document.wordCount),
-            activeSegment?.rate ?? preferences.rate,
-          );
-          setIsPlaying(true);
-          setStatusMessage("Lectura reanudada con Voz actualizada.");
-        })
-        .catch((error: unknown) => {
-          setIsPlaying(false);
-          setStatusMessage(
-            error instanceof Error
-              ? `No se pudo reanudar la Voz actualizada: ${error.message}`
-              : "No se pudo reanudar la Voz actualizada.",
-          );
-        });
-      return;
+      if (selectedVoiceModelRef.current !== PIPER_VOICE_MODEL_ID) {
+        stopPiperAudio();
+      } else {
+        shouldContinuePlaybackRef.current = true;
+        void piperAudioRef.current
+          .play()
+          .then(() => {
+            const activeSegment = activeSegmentRef.current;
+            startPiperProgressTracker(
+              piperAudioRef.current as HTMLAudioElement,
+              activeSegment?.startWord ?? currentWord,
+              Math.min(activeSegment?.endWord ?? document.wordCount, document.wordCount),
+              playbackSessionRef.current,
+            );
+            setIsPlaying(true);
+            setStatusMessage("Lectura reanudada con Voz actualizada.");
+          })
+          .catch((error: unknown) => {
+            setIsPlaying(false);
+            setStatusMessage(
+              error instanceof Error
+                ? `No se pudo reanudar la Voz actualizada: ${error.message}`
+                : "No se pudo reanudar la Voz actualizada.",
+            );
+          });
+        return;
+      }
     }
 
     if (window.speechSynthesis.paused && utteranceRef.current) {
@@ -1153,6 +1241,21 @@ export function ReaderApp() {
   }
 
   function changeVoiceModel(modelId: VoiceModelId) {
+    selectedVoiceModelRef.current = modelId;
+    const wasPlaying =
+      isPlaying ||
+      Boolean(piperAudioRef.current && !piperAudioRef.current.ended) ||
+      Boolean(utteranceRef.current && window.speechSynthesis.speaking);
+    const restartWord = currentWord;
+
+    stopPlayback();
+    setIsPlaying(false);
+    if (wasPlaying) {
+      window.setTimeout(() => {
+        void startSpeech(restartWord, undefined, preferences.rate, modelId);
+      }, 0);
+    }
+
     updatePreferences({ voiceId: modelId });
     setIsVoiceMenuOpen(false);
     setStatusMessage(
@@ -1641,7 +1744,7 @@ export function ReaderApp() {
                   }
                 >
                   {visibleTextBlocks.map((block) =>
-                    renderStructuredTextBlock(block, currentWord, activeWordRef),
+                    renderStructuredTextBlock(block, currentWord),
                   )}
                 </div>
               </article>
@@ -1880,13 +1983,11 @@ function createVisibleTextParts(params: {
 function renderStructuredTextBlock(
   block: VisibleTextBlock,
   currentWord: number,
-  activeWordRef: RefObject<HTMLSpanElement | null>,
 ) {
   const content = block.parts.map((part) =>
     part.type === "word" ? (
       <span
         key={part.id}
-        ref={part.wordIndex === currentWord ? activeWordRef : undefined}
         className={part.wordIndex === currentWord ? "word active-word" : "word"}
         data-word-index={part.wordIndex}
       >

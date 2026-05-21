@@ -1011,15 +1011,17 @@ button:focus-visible {
 }
 
 .mode-focus .document-text {
-  max-width: 920px;
+  width: 100%;
+  max-width: none;
   height: 100%;
   max-height: none;
-  margin: 0 auto;
+  box-sizing: border-box;
+  margin: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
   touch-action: pan-y;
   cursor: pointer;
-  padding: 18dvh clamp(24px, 5vw, 72px) 22dvh;
+  padding: 16dvh clamp(36px, 5vw, 96px) 21dvh;
   font-size: clamp(1.38rem, 2.6vw, 2.2rem);
   -webkit-overflow-scrolling: touch;
 }
@@ -1051,16 +1053,18 @@ button:focus-visible {
 
 .focus-control-dock {
   position: fixed;
-  right: max(14px, env(safe-area-inset-right));
+  right: auto;
   bottom: max(14px, env(safe-area-inset-bottom));
-  left: max(14px, env(safe-area-inset-left));
+  left: 50%;
   z-index: 70;
   display: grid;
-  grid-template-columns: auto minmax(210px, auto) minmax(0, 1fr) auto auto auto;
+  width: min(calc(100vw - 28px), 1680px);
+  grid-template-columns: auto minmax(360px, 560px) minmax(560px, 1fr) auto auto auto;
   align-items: center;
   gap: 8px;
-  max-width: 1060px;
+  max-width: 1680px;
   margin: 0 auto;
+  transform: translateX(-50%);
   border: 1px solid rgba(242, 242, 238, 0.16);
   border-radius: 22px;
   background: rgba(11, 11, 11, 0.68);
@@ -1240,6 +1244,15 @@ button:focus-visible {
 
   .transport {
     flex-wrap: wrap;
+  }
+
+  .focus-control-dock {
+    grid-template-columns: auto minmax(270px, 1fr) minmax(340px, 1.2fr) auto auto auto;
+  }
+
+  .mode-focus .document-text {
+    padding-right: clamp(32px, 4vw, 64px);
+    padding-left: clamp(32px, 4vw, 64px);
   }
 }
 
