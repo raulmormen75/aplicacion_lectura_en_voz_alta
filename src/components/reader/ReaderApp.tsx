@@ -69,6 +69,11 @@ type VisibleTextBlock = {
   parts: VisibleTextPart[];
 };
 
+type PiperWordTiming = {
+  startsAt: number;
+  wordIndex: number;
+};
+
 type VoiceStartupState = {
   visible: boolean;
   status: PiperStage;
@@ -125,9 +130,11 @@ export function ReaderApp() {
     startWord: number;
     endWord: number;
     rate: PlaybackRate;
+    textToSpeak?: string;
   } | null>(null);
   const intervalRef = useRef<number | null>(null);
   const piperProgressFrameRef = useRef<number | null>(null);
+  const piperWordTimelineRef = useRef<PiperWordTiming[]>([]);
   const activeWordRef = useRef<HTMLSpanElement | null>(null);
   const playbackSessionRef = useRef(0);
   const shouldContinuePlaybackRef = useRef(false);
@@ -162,6 +169,7 @@ export function ReaderApp() {
     clearPiperProgressTracker();
     piperAudioRef.current?.pause();
     piperAudioRef.current = null;
+    piperWordTimelineRef.current = [];
 
     if (piperAudioUrlRef.current) {
       URL.revokeObjectURL(piperAudioUrlRef.current);
@@ -679,10 +687,10 @@ export function ReaderApp() {
     startWord: number,
     endWord: number,
     activeSession: number,
+    textToSpeak?: string,
   ) {
     clearProgressTimer();
     clearPiperProgressTracker();
-    const totalWords = Math.max(1, endWord - startWord);
 
     const tick = () => {
       if (
@@ -696,8 +704,21 @@ export function ReaderApp() {
 
       const hasDuration = Number.isFinite(audio.duration) && audio.duration > 0;
       if (hasDuration) {
-        const ratio = Math.max(0, Math.min(1, audio.currentTime / audio.duration));
-        const nextWord = Math.min(endWord, startWord + Math.floor(totalWords * ratio));
+        if (piperWordTimelineRef.current.length === 0) {
+          piperWordTimelineRef.current = buildPiperWordTimeline(
+            textToSpeak ?? "",
+            startWord,
+            endWord,
+            audio.duration,
+          );
+        }
+
+        const nextWord = getPiperWordForTime(
+          piperWordTimelineRef.current,
+          audio.currentTime + getPiperHighlightLead(audio.playbackRate),
+          startWord,
+          endWord,
+        );
         if (nextWord > progressWordRef.current) {
           updateProgress(nextWord);
         }
@@ -796,6 +817,7 @@ export function ReaderApp() {
       startWord: params.speechBaseWord,
       endWord: params.chunkEndWord,
       rate: params.rate,
+      textToSpeak: params.textToSpeak,
     };
 
     utterance.onboundary = (event) => {
@@ -926,6 +948,7 @@ export function ReaderApp() {
 
     const cleanup = () => {
       if (piperAudioRef.current === audio) piperAudioRef.current = null;
+      piperWordTimelineRef.current = [];
       if (piperAudioUrlRef.current === audioUrl) {
         URL.revokeObjectURL(audioUrl);
         piperAudioUrlRef.current = null;
@@ -972,6 +995,7 @@ export function ReaderApp() {
       params.speechBaseWord,
       params.chunkEndWord,
       params.activeSession,
+      params.textToSpeak,
     );
     setVoiceStartup(null);
     setIsPlaying(true);
@@ -1057,6 +1081,7 @@ export function ReaderApp() {
               activeSegment?.startWord ?? currentWord,
               Math.min(activeSegment?.endWord ?? document.wordCount, document.wordCount),
               playbackSessionRef.current,
+              activeSegment?.textToSpeak,
             );
             setIsPlaying(true);
             setStatusMessage("Lectura reanudada con Voz actualizada.");
@@ -1218,10 +1243,36 @@ export function ReaderApp() {
   function changeRate(rate: PlaybackRate) {
     updatePreferences({ rate });
     setStatusMessage(`Velocidad actualizada a ${rate === 1 ? "Normal" : rate}.`);
+    if (piperAudioRef.current && !piperAudioRef.current.ended) {
+      piperAudioRef.current.playbackRate = rate;
+      if (activeSegmentRef.current) {
+        activeSegmentRef.current = {
+          ...activeSegmentRef.current,
+          rate,
+        };
+      }
+
+      if (!piperAudioRef.current.paused) {
+        const activeSegment = activeSegmentRef.current;
+        const safeEndWord = Math.min(
+          activeSegment?.endWord ?? document?.wordCount ?? progressWordRef.current,
+          document?.wordCount ?? progressWordRef.current,
+        );
+        startPiperProgressTracker(
+          piperAudioRef.current,
+          activeSegment?.startWord ?? progressWordRef.current,
+          safeEndWord,
+          playbackSessionRef.current,
+          activeSegment?.textToSpeak,
+        );
+      }
+      return;
+    }
+
     if (isPlaying) {
       stopPlayback();
       setIsPlaying(false);
-      void startSpeech(currentWord, undefined, rate);
+      void startSpeech(progressWordRef.current, undefined, rate);
     }
   }
 
@@ -1399,14 +1450,20 @@ export function ReaderApp() {
     );
   }
 
-  function renderVoiceModelSelector() {
+  function renderVoiceModelSelector(variant: "standard" | "focus" = "standard") {
     const activeModel =
       VOICE_MODELS.find((model) => model.id === selectedVoiceModel) ?? VOICE_MODELS[0];
 
     return (
-      <div className="voice-model-selector">
+      <div
+        className={`voice-model-selector ${
+          variant === "focus" ? "focus-voice-selector" : ""
+        }`}
+      >
         <button
-          className="voice-model-button"
+          className={`voice-model-button ${
+            variant === "focus" ? "focus-voice-button" : ""
+          }`}
           type="button"
           aria-haspopup="menu"
           aria-expanded={isVoiceMenuOpen}
@@ -1469,9 +1526,12 @@ export function ReaderApp() {
   function renderFocusControls() {
     return (
       <aside className="focus-control-dock" aria-label="Controles de lectura en pantalla completa">
-        <div className="focus-readout" aria-label="Avance de lectura">
-          <span>{formatRemainingTime(remainingSeconds)} restantes</span>
-          <strong>{percentage}%</strong>
+        <div className="focus-readout-row">
+          <div className="focus-readout" aria-label="Avance de lectura">
+            <span>{formatRemainingTime(remainingSeconds)} restantes</span>
+            <strong>{percentage}%</strong>
+          </div>
+          {renderVoiceModelSelector("focus")}
         </div>
 
         {renderTextNavigationControls("focus")}
@@ -1934,6 +1994,81 @@ function getRenderedLineTargets(readingPane: Element) {
       };
     })
     .sort((a, b) => a.startWord - b.startWord);
+}
+
+function buildPiperWordTimeline(
+  text: string,
+  startWord: number,
+  endWord: number,
+  durationSeconds: number,
+): PiperWordTiming[] {
+  const wordCount = Math.max(0, endWord - startWord);
+  if (wordCount === 0 || !Number.isFinite(durationSeconds) || durationSeconds <= 0) return [];
+
+  const localTokens = tokenizeWords(text);
+  const timingCount = Math.min(wordCount, localTokens.length || wordCount);
+  const weights = Array.from({ length: timingCount }, (_, index) => {
+    const token = localTokens[index];
+    if (!token) return 1;
+
+    const nextStart = localTokens[index + 1]?.start ?? text.length;
+    const separator = text.slice(token.end, nextStart);
+    const wordLength = Math.max(1, token.text.length);
+    let weight = Math.max(0.82, Math.min(3.8, Math.sqrt(wordLength) * 0.96));
+
+    if (/[.!?]/.test(separator)) weight += 1.25;
+    if (/[;:]/.test(separator)) weight += 0.85;
+    if (/,/.test(separator)) weight += 0.5;
+    if (/\n{2,}/.test(separator)) weight += 1.05;
+    if (/\n/.test(separator)) weight += 0.35;
+
+    return weight;
+  });
+
+  const totalWeight = weights.reduce((sum, weight) => sum + weight, 0) || timingCount;
+  const usableDuration = Math.max(0.1, durationSeconds);
+  let elapsed = 0;
+
+  return weights.map((weight, index) => {
+    const timing = {
+      startsAt: Math.min(usableDuration, elapsed),
+      wordIndex: startWord + index,
+    };
+    elapsed += (weight / totalWeight) * usableDuration;
+    return timing;
+  });
+}
+
+function getPiperWordForTime(
+  timeline: PiperWordTiming[],
+  mediaTime: number,
+  startWord: number,
+  endWord: number,
+) {
+  if (timeline.length === 0) return startWord;
+
+  let low = 0;
+  let high = timeline.length - 1;
+  let match = 0;
+
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2);
+    if (timeline[middle].startsAt <= mediaTime) {
+      match = middle;
+      low = middle + 1;
+    } else {
+      high = middle - 1;
+    }
+  }
+
+  return Math.max(startWord, Math.min(endWord, timeline[match].wordIndex));
+}
+
+function getPiperHighlightLead(playbackRate: number) {
+  if (playbackRate >= 1) return 0.2;
+  if (playbackRate >= 0.85) return 0.16;
+  if (playbackRate >= 0.75) return 0.13;
+  return 0.1;
 }
 
 function createVisibleTextParts(params: {

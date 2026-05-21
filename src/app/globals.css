@@ -1073,12 +1073,35 @@ button:focus-visible {
   backdrop-filter: blur(20px);
 }
 
+.focus-readout-row {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+
 .focus-readout {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 6px;
   white-space: nowrap;
+}
+
+.focus-voice-selector {
+  z-index: 76;
+}
+
+.focus-voice-selector .voice-model-button {
+  width: 36px;
+  min-height: 34px;
+  padding: 0;
+  border-radius: 12px;
+}
+
+.focus-voice-selector .voice-model-button span {
+  display: none;
 }
 
 .focus-readout span,
@@ -1344,7 +1367,7 @@ button:focus-visible {
     padding: 8px;
   }
 
-  .focus-readout {
+  .focus-readout-row {
     justify-self: start;
   }
 
