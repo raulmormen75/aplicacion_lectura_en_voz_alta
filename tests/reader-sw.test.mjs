@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { webcrypto } from "node:crypto";
+import { createHash, webcrypto } from "node:crypto";
 import { test } from "node:test";
 import { runInNewContext } from "node:vm";
 import { gzipSync } from "node:zlib";
@@ -30,6 +30,7 @@ async function fixture(id = "a") {
       if (!files.has(path)) throw Error("missing fixture asset");
       return Buffer.from(files.get(path).body);
     },
+    writeAsset: async (path, bytes) => { files.set(path, { body: bytes.toString(), type: "application/javascript" }); },
   });
   return { manifest, files };
 }
@@ -97,7 +98,8 @@ function worker({ manifest, files }, stores = new Map()) {
     });
     return response;
   };
-  return { control, caches, stores, deleted, lifecycle, request, name: PREFIX + manifest.version };
+  const source = (url) => manifest.entries.find((entry) => entry.url === url)?.fetchUrl ?? url;
+  return { control, caches, stores, deleted, lifecycle, request, source, name: PREFIX + manifest.version };
 }
 
 test("first install precaches complete HTML/JS/CSS/fonts without visiting any asset first", async () => {
@@ -114,6 +116,59 @@ test("first install precaches complete HTML/JS/CSS/fonts without visiting any as
   for (const entry of data.manifest.entries.filter((entry) => entry.url !== SHELL_PATH)) {
     assert.equal(await (await w.request(entry.url)).text(), data.files.get(entry.url).body);
   }
+});
+
+test("generator copies only core JS verbatim to content-addressed same-origin sources", async () => {
+  const data = await fixture();
+  for (const entry of data.manifest.entries) {
+    if (entry.kind !== "js") {
+      assert.equal(entry.fetchUrl, undefined);
+      continue;
+    }
+    assert.equal(entry.fetchUrl, `/reader-assets/offline/${entry.sha256}.js`);
+    const copy = Buffer.from(data.files.get(entry.fetchUrl).body);
+    assert.equal(copy.toString(), data.files.get(entry.url).body);
+    assert.equal(copy.byteLength, entry.bytes);
+    assert.equal(createHash("sha256").update(copy).digest("hex"), entry.sha256);
+  }
+});
+
+test("installation bypasses transformed Next JS and caches pristine copies under original URLs", async () => {
+  const data = await fixture();
+  const entry = data.manifest.entries.find((entry) => entry.kind === "js");
+  const original = data.files.get(entry.url).body;
+  data.files.get(entry.url).body += "/* injected feedback.js deployment trailer */";
+  const w = worker(data);
+  await w.lifecycle("install");
+  await w.lifecycle("activate");
+  assert.ok(w.control.fetches.includes(ORIGIN + entry.fetchUrl));
+  assert.ok(!w.control.fetches.includes(ORIGIN + entry.url));
+  assert.ok(!w.stores.get(w.name).has(ORIGIN + entry.fetchUrl));
+  w.control.offline = true;
+  assert.equal(await (await w.request(entry.url)).text(), original);
+  for (const body of [original + "/* trailer */", "x".repeat(original.length)]) {
+    const failed = worker(data);
+    failed.control.overrides.set(entry.fetchUrl, { body });
+    await assert.rejects(failed.lifecycle("install"));
+    assert.equal(failed.stores.has(failed.name), false);
+  }
+});
+
+test("worker rejects foreign or non-content-addressed copy sources and supports legacy entries", async () => {
+  for (const fetchUrl of ["https://foreign.test/copy.js", "/api/documents/process", "/reader-assets/offline/wrong.js"]) {
+    const data = await fixture();
+    data.manifest.entries.find((entry) => entry.kind === "js").fetchUrl = fetchUrl;
+    const w = worker(data);
+    await assert.rejects(w.lifecycle("install"));
+    assert.ok(!w.control.fetches.includes(new URL(fetchUrl, ORIGIN).href));
+    assert.equal(w.stores.has(w.name), false);
+  }
+  const data = await fixture();
+  const entry = data.manifest.entries.find((entry) => entry.kind === "js");
+  delete entry.fetchUrl;
+  const w = worker(data);
+  await w.lifecycle("install");
+  assert.ok(w.control.fetches.includes(ORIGIN + entry.url));
 });
 
 test("partial first install cannot activate or leave a committed shell", async () => {
@@ -133,7 +188,7 @@ test("update failure preserves the complete old generation and unrelated caches"
   await old.lifecycle("install");
   await old.lifecycle("activate");
   const next = worker(await fixture("b"), stores);
-  next.control.overrides.set("/_next/static/b.js", { error: true });
+  next.control.overrides.set(next.source("/_next/static/b.js"), { error: true });
   await assert.rejects(next.lifecycle("install"));
   assert.deepEqual(next.deleted, [next.name]);
   assert.ok(stores.has(old.name));
@@ -190,7 +245,7 @@ test("precache rejects private, redirected, partial, HTML-as-JS and wrong-build 
     { body: "x".repeat(100) }, { body: "x" },
   ]) {
     const w = worker(await fixture());
-    w.control.overrides.set("/_next/static/a.js", override);
+    w.control.overrides.set(w.source("/_next/static/a.js"), override);
     await assert.rejects(w.lifecycle("install"));
     assert.equal(w.control.skips, 0);
     assert.equal(w.stores.has(w.name), false);
@@ -205,14 +260,14 @@ test("compressed Content-Length does not reject valid decoded bytes or bypass bo
   assert.ok(Number(headers["content-length"]) > Buffer.byteLength(body));
   const w = worker(data);
   // Browser Fetch already decoded the body, but retains the transfer headers.
-  w.control.overrides.set(path, { body, headers });
+  w.control.overrides.set(w.source(path), { body, headers });
   await w.lifecycle("install");
   await w.lifecycle("activate");
   w.control.offline = true;
   assert.equal(await (await w.request(path)).text(), body);
   for (const invalid of [body + "extra", "x", "x".repeat(body.length)]) {
     const failed = worker(data);
-    failed.control.overrides.set(path, { body: invalid, headers });
+    failed.control.overrides.set(failed.source(path), { body: invalid, headers });
     await assert.rejects(failed.lifecycle("install"));
     assert.equal(failed.stores.has(failed.name), false);
   }

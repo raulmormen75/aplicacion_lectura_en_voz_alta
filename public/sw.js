@@ -66,7 +66,13 @@ async function verifiedResponse(entry) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 15_000);
   try {
-    const response = await fetch(new Request(new URL(entry.url, ROOT), {
+    const source = new URL(entry.fetchUrl ?? entry.url, ROOT);
+    if (source.origin !== self.location.origin || source.username || source.password || source.hash ||
+        (entry.fetchUrl !== undefined && (entry.kind !== "js" ||
+          entry.fetchUrl !== `/reader-assets/offline/${entry.sha256}.js`))) {
+      throw new Error("Invalid precache source.");
+    }
+    const response = await fetch(new Request(source, {
       cache: "reload", credentials: "omit", redirect: "error", signal: controller.signal,
     }));
     if (!validResponse(response, entry)) throw new Error("Invalid precache response.");

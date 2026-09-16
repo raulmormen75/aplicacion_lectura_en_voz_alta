@@ -7,9 +7,12 @@ import { chromium } from "playwright";
 
 const target = new URL(process.argv[2] ?? "http://localhost:3010/");
 assert.ok(["http:", "https:"].includes(target.protocol), "La URL debe usar HTTP o HTTPS.");
-assert.ok(["localhost", "127.0.0.1", "[::1]"].includes(target.hostname), "Esta prueba solo admite un servidor local.");
+const isLocal = ["localhost", "127.0.0.1", "[::1]"].includes(target.hostname);
+const isApprovedDeployment = target.origin === "https://aplicacionparaleerenvozalta.vercel.app";
+assert.ok(isLocal || isApprovedDeployment,
+  "Esta prueba solo admite servidores locales o https://aplicacionparaleerenvozalta.vercel.app/ (HTTPS y puerto estandar).");
 assert.ok(!target.username && !target.password && target.pathname === "/" && !target.search && !target.hash,
-  "Usa la raiz del servidor local, sin credenciales, parametros ni fragmentos.");
+  "Usa la raiz del servidor permitido, sin credenciales, parametros ni fragmentos.");
 
 const TIMEOUT = 30_000;
 const SW_TIMEOUT = 120_000;

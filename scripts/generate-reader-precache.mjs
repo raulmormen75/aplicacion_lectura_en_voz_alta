@@ -8,7 +8,7 @@ const ORIGIN = "https://reader-build.invalid";
 export const SHELL_PATH = "/reader-assets/offline-shell.html";
 const sha256 = (data) => createHash("sha256").update(data).digest("hex");
 
-export async function createPrecacheManifest({ html, buildId, buildManifest, workerSource, readAsset }) {
+export async function createPrecacheManifest({ html, buildId, buildManifest, workerSource, readAsset, writeAsset }) {
   if (!buildId.trim()) throw new Error("Missing Next build ID.");
   const dom = new JSDOM(html, { url: ORIGIN });
   const urls = new Map([[SHELL_PATH, "html"]]);
@@ -49,7 +49,13 @@ export async function createPrecacheManifest({ html, buildId, buildManifest, wor
       if (!bytes.length || bytes.length > 2_000_000) throw new Error(`Offline resource outside byte budget: ${url}`);
       total += bytes.length;
       if (total > 12_000_000) throw new Error("Offline core exceeds 12 MB.");
-      entries.push({ url, kind, bytes: bytes.length, sha256: sha256(bytes) });
+      const entry = { url, kind, bytes: bytes.length, sha256: sha256(bytes) };
+      if (kind === "js") {
+        entry.fetchUrl = `/reader-assets/offline/${entry.sha256}.js`;
+        // Publish exact build bytes outside Next's runtime transformation paths.
+        await writeAsset?.(entry.fetchUrl, bytes);
+      }
+      entries.push(entry);
     }
     const version = sha256(JSON.stringify({ buildId, entries, worker: sha256(workerSource) }));
     return { version, buildId, entries };
@@ -76,9 +82,12 @@ export async function generateReaderPrecache(root) {
     if (pathname === "/favicon.ico") return readFile(join(root, ".next/server/app/favicon.ico.body"));
     return readFile(file);
   };
-  const manifest = await createPrecacheManifest({ html, buildId, buildManifest, workerSource, readAsset });
   const directory = join(root, "public/reader-assets");
-  await mkdir(directory, { recursive: true });
+  await mkdir(join(directory, "offline"), { recursive: true });
+  const manifest = await createPrecacheManifest({
+    html, buildId, buildManifest, workerSource, readAsset,
+    writeAsset: (url, bytes) => writeFile(join(root, "public", url.slice(1)), bytes),
+  });
   await writeFile(join(directory, "offline-shell.html"), html);
   // Publish the manifest last; mixed-deployment bytes fail the worker's digest checks.
   await writeFile(join(directory, "offline-manifest.js"), `self.__READER_PRECACHE = ${JSON.stringify(manifest)};\n`);

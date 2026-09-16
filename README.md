@@ -68,9 +68,10 @@ Comprobación offline aislada, con Microsoft Edge instalado y un servidor de pro
 
 ```bash
 node tests/browser-offline.mjs http://127.0.0.1:3012/
+node tests/browser-offline.mjs https://aplicacionparaleerenvozalta.vercel.app/
 ```
 
-La prueba usa un contexto temporal, nunca el perfil personal. Después de una primera visita completa, desactiva la red y comprueba la interfaz, el icono y la preparación de texto. No acredita voces ni OCR sin descargar sus recursos previamente.
+La prueba solo admite servidores locales o el dominio de producción indicado y usa un contexto temporal, nunca el perfil personal. Después de una primera visita completa, desactiva la red y comprueba la interfaz, el icono y la preparación de texto. No acredita voces ni OCR sin descargar sus recursos previamente.
 
 El paso `postbuild` genera un núcleo offline de HTML, JavaScript, estilos e iconos en `public/reader-assets/`; se verifica como una unidad antes de activarlo. Las actualizaciones esperan al cierre de las pestañas anteriores. Las cachés antiguas se conservan para no romper pestañas abiertas; el navegador puede desalojarlas por falta de espacio. No se guardan documentos ni respuestas API en esta caché.
 
