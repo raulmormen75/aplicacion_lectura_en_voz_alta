@@ -45,6 +45,21 @@ Conservar negro, grafito, marfil y dorado, con el icono aprobado. Reducir conten
 - Compilación, revisión estática, pruebas automatizadas y comprobación de la versión publicada.
 - Rendimiento y voz en Android/iOS físicos: NO CONFIRMADO; la emulación no sustituye estos dispositivos.
 
+## Validación complementaria
+
+Esta sección actualiza los estados históricos del dictamen inicial, sin convertir pendientes físicos en pruebas realizadas.
+
+- La corrección del importador web se publicó en `1e75b3b`; el dominio de producción respondió HTTP 200 al importar `https://example.com` y mostró su contenido.
+- En 845×390 se reprodujo una salida del modo inmersivo fuera del ancho visible. La rejilla corregida mantiene reproducción y salida dentro de la pantalla; las velocidades ocupan aproximadamente 214 px, sin estirarse a toda la fila. El selector de voz se abre sobre la barra.
+- En 1440×1000 el contenido inmersivo ocupa los 1440 px y la barra aproximadamente 1412 px, sin botones fuera del viewport. En 390×845 se comprobó acceso a todas las herramientas. Son tamaños emulados, no equipos móviles físicos.
+- Prueba independiente en Edge headless con contexto temporal: primera visita online, instalación completa del núcleo de 16 recursos, red desactivada, recarga mediante service worker y preparación de texto sin API. Resultado PASS; icono visible, encabezado, párrafos y puntuación final conservados. No prueba voces ni OCR offline.
+- Se corrige una pérdida de puntuación visual: la ventana terminaba en el último token y excluía los signos posteriores. Ahora conserva el final del documento.
+- Persistencia entre pestañas: comparación de revisión y transacción coordinada para impedir que una pestaña obsoleta sobrescriba cambios; aviso explícito de recarga, sin mezclar avances arbitrariamente. Las pruebas incluyen borrado abortado y recuperación explícita de datos inválidos.
+- Limitación del restablecimiento programático, actualmente sin botón en la interfaz: IndexedDB y localStorage no son una transacción conjunta. Una terminación del proceso después de confirmar el borrado y antes de finalizar su marcador puede dejar un estado pendiente. No se presenta esa operación como recuperación tolerante a cualquier interrupción ni se agregó una función visible de borrado.
+- El núcleo offline se genera en postbuild y verifica tamaño, tipo y huella antes de activarse. No precarga modelos de voz ni recursos diferidos grandes. La actualización espera que cierren las pestañas anteriores y conserva generaciones previas; el consumo acumulado de caché es una limitación conocida.
+- Comparación de voces documentada en `REPORTE_PIPER_TTS.md`: se conserva Claude aprobado y el respaldo. No hay sustitución femenina joven latinoamericana, más ligera y compatible comprobada entre las candidatas revisadas. El resaltado de Piper sigue siendo una estimación ligada al audio, no alineación fonética exacta.
+- Validación final de esta tanda: 156 pruebas automatizadas aprobadas, ESLint y compilación de producción correctos. Núcleo offline de aproximadamente 2.29 MB, sin modelos pesados en Git.
+
 ## Avance de implementación local
 
 Esta sección actualiza el dictamen inicial; no acredita publicación.

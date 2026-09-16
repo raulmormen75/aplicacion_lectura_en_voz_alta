@@ -224,8 +224,9 @@ export function ReaderApp() {
     const startWord = Math.max(0, windowAnchor - READER_WINDOW_BEFORE);
     const endWord = Math.min(tokens.length, windowAnchor + READER_WINDOW_AFTER);
     const visibleWords = tokens.slice(startWord, endWord);
-    const windowStart = visibleWords[0]?.start ?? 0;
-    const windowEnd = visibleWords.at(-1)?.end ?? document.cleanText.length;
+    const windowStart = startWord === 0 ? 0 : visibleWords[0]?.start ?? 0;
+    // Include punctuation after the last visible word, including the document's ending.
+    const windowEnd = tokens[endWord]?.start ?? document.cleanText.length;
 
     return textBlocks
       .filter((block) => block.end > windowStart && block.start < windowEnd)
@@ -268,7 +269,7 @@ export function ReaderApp() {
       .catch(() => undefined);
 
     if ("serviceWorker" in navigator) {
-      navigator.serviceWorker.register("/sw.js").catch(() => undefined);
+      navigator.serviceWorker.register("/sw.js", { updateViaCache: "none" }).catch(() => undefined);
     }
 
     return () => {
@@ -1829,6 +1830,7 @@ export function ReaderApp() {
               width={44}
               height={44}
               priority
+              unoptimized
             />
           </span>
           <div>

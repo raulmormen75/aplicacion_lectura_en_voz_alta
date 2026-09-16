@@ -1796,36 +1796,106 @@ button:focus-visible {
   }
 
   .focus-control-dock {
-    display: flex;
-    flex-wrap: nowrap;
-    justify-content: flex-start;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(328px, 1.2fr) 78px 64px;
+    grid-template-areas:
+      "readout transport theme exit"
+      "nav speed speed speed";
     left: max(14px, env(safe-area-inset-left));
     right: max(14px, env(safe-area-inset-right));
     width: auto;
     max-width: none;
     transform: none;
-    overflow-x: auto;
-    overscroll-behavior-x: contain;
+    overflow: visible;
     gap: 6px;
     padding: 7px;
   }
 
   .focus-control-dock > * {
-    flex: 0 0 auto;
+    min-width: 0;
     width: auto;
   }
 
-  .focus-control-dock .focus-text-nav,
-  .focus-control-dock .focus-transport {
-    display: flex;
+  .focus-control-dock .focus-readout-row {
+    grid-area: readout;
+    justify-self: stretch;
+    justify-content: space-between;
   }
 
-  /* Keep the menu outside the dock's horizontal scroll clipping. */
+  .focus-control-dock .focus-readout {
+    min-width: 0;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+    gap: 2px;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
+  .focus-control-dock .focus-transport {
+    grid-area: transport;
+    display: grid;
+    grid-template-columns: minmax(54px, 1fr) minmax(54px, 1fr) minmax(92px, 1.5fr) minmax(54px, 1fr) minmax(54px, 1fr);
+    gap: 4px;
+    overflow: visible;
+  }
+
+  .focus-control-dock .focus-transport button {
+    padding-inline: 4px;
+    white-space: normal;
+  }
+
+  .focus-control-dock .focus-theme-toggle {
+    grid-area: theme;
+    justify-self: stretch;
+  }
+
+  .focus-control-dock .focus-exit-action {
+    grid-area: exit;
+    justify-self: stretch;
+  }
+
+  .focus-control-dock .focus-text-nav {
+    grid-area: nav;
+  }
+
+  .focus-control-dock .focus-speed {
+    grid-area: speed;
+    justify-self: start;
+    width: max-content;
+    max-width: 100%;
+  }
+
+  /* Only secondary groups scroll; transport and exit stay in fixed grid cells. */
+  .focus-control-dock .focus-text-nav,
+  .focus-control-dock .focus-speed {
+    display: flex;
+    justify-content: flex-start;
+    max-width: 100%;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    scroll-padding-inline: 4px;
+  }
+
+  .focus-control-dock .focus-text-nav button,
+  .focus-control-dock .focus-speed button {
+    flex: 1 0 auto;
+    min-width: 44px;
+    white-space: nowrap;
+  }
+
+  .focus-control-dock .focus-speed button {
+    flex: 0 0 auto;
+  }
+
+  /* Anchor above the complete dock, outside the secondary scrolling groups. */
   .focus-voice-selector .voice-model-menu {
-    position: fixed;
-    left: max(14px, env(safe-area-inset-left));
-    bottom: calc(var(--focus-dock-height, 72px) + 28px + env(safe-area-inset-bottom));
-    max-height: max(80px, calc(100dvh - var(--focus-dock-height, 72px) - 56px - env(safe-area-inset-bottom)));
+    position: absolute;
+    left: 0;
+    bottom: calc(100% + 8px);
+    width: 240px;
+    min-width: 0;
+    max-width: calc(100vw - 28px - env(safe-area-inset-left) - env(safe-area-inset-right));
+    max-height: max(44px, calc(100dvh - var(--focus-dock-height, 128px) - 48px - env(safe-area-inset-bottom)));
   }
 
   .focus-readout span,
@@ -1836,6 +1906,7 @@ button:focus-visible {
   }
 
   .focus-control-dock button {
+    min-width: 44px;
     min-height: 44px;
     padding: 0 7px;
   }
@@ -1846,6 +1917,16 @@ button:focus-visible {
 
   .mobile-player-slot .reset-button {
     width: 48px;
+  }
+}
+
+@media (orientation: landscape) and (max-height: 560px) and (max-width: 700px) {
+  .focus-control-dock {
+    grid-template-columns: repeat(3, minmax(0, 1fr)) 64px;
+    grid-template-areas:
+      "transport transport transport exit"
+      "readout readout readout theme"
+      "nav nav speed speed";
   }
 }
 

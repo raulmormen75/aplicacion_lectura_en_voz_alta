@@ -10,6 +10,7 @@
     "dev": "next dev",
     "prebuild": "node scripts/prepare-reader-assets.mjs",
     "build": "next build",
+    "postbuild": "node scripts/generate-reader-precache.mjs",
     "start": "next start",
     "lint": "eslint",
     "test": "node --experimental-strip-types --test --test-isolation=none tests/*.test.mjs"

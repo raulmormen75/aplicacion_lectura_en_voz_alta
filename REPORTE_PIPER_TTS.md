@@ -103,3 +103,20 @@ Pruebas realizadas:
 - No se sube el modelo pesado al repositorio.
 - La UI muestra estados claros durante el arranque.
 - La consola registra estados y tiempos de Piper.
+
+## Revision de voces ligeras: 16 de septiembre de 2026
+
+Se conserva la voz aprobada y el respaldo del navegador. No se encontro una sustitucion comprobada que cumpla simultaneamente voz femenina latinoamericana, timbre joven, menor descarga y funcionamiento con la biblioteca actual. Esto describe las candidatas revisadas, no la inexistencia de otras voces.
+
+| Candidata | Evidencia revisada | Dictamen |
+| --- | --- | --- |
+| `es_MX-claude-high`, actual | Catalogo original: 63,122,309 bytes de ONNX. Ficha completa: Mexico, un hablante, calidad alta; no declara genero ni edad. | Conservar el sonido aprobado. No presentarlo como femenino joven por una inferencia del nombre. |
+| `es_MX-ald-x_low` | Catalogo: 20,986,952 bytes. Ficha completa: datos sinteticos derivados de Ald medium; objetivo declarado de menor tamano y tiempo. | Menor descarga comprobada; calidad, genero y rendimiento real NO CONFIRMADOS. No cambiar la voz solo por peso. |
+| `es_AR-daniela-high` | Catalogo: 114,199,011 bytes; Argentina. | No resuelve el peso inicial: supera al modelo actual. |
+| Variantes FP16 | ONNX Runtime documenta reduccion de tamano y posibles beneficios en algunas GPU, con reservas de precision y operaciones CPU. | No asumir compatibilidad ni aceleracion en WASM. Requiere prueba separada de grafo, audio y dispositivos. |
+
+Fuentes primarias: [catalogo Piper, objetos completos de cada voz](https://huggingface.co/rhasspy/piper-voices/resolve/main/voices.json), [ficha Claude, Dataset y Training](https://huggingface.co/rhasspy/piper-voices/blob/main/es/es_MX/claude/high/MODEL_CARD), [ficha Ald x-low, Dataset y Training](https://huggingface.co/rhasspy/piper-voices/blob/main/es/es_MX/ald/x_low/MODEL_CARD), [ONNX Runtime, Float16 y Mixed Precision](https://onnxruntime.ai/docs/performance/model-optimizations/float16.html).
+
+Clasificacion: tamanos e idioma tienen soporte directo en el catalogo; la recomendacion de conservar Claude es una conclusion tecnica. La velocidad de descarga depende de la red, y la de generacion depende del dispositivo. Ninguna cifra de tamano constituye un benchmark. No se descargaron estas candidatas ni se enviaron documentos a demos externas durante esta comparacion.
+
+La cache temporal de fragmentos implementada evita regenerar audio repetido dentro de la sesion, pero no reduce la primera descarga del modelo. El navegador puede desalojar sus caches. El resaltado Piper usa tiempos estimados ajustados al reloj del audio: no dispone de alineacion exacta por palabra y no debe describirse como tal.

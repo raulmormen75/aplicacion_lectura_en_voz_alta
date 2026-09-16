@@ -106,6 +106,8 @@ const documentSchema = z.object({
 });
 const checkpointSchema = z.object({
   version: z.literal(2),
+  revision: identifier.optional(),
+  pendingClear: z.boolean().optional(),
   documentKey: identifier.nullable(),
   documentId: identifier.nullable(),
   progress: progressSchema,
@@ -123,6 +125,10 @@ type DocumentWrite = {
 let documentWrite: DocumentWrite | undefined;
 let saveSequence = 0;
 let isClearing = false;
+// Only a successful load or this instance's own publication may advance this baseline.
+let knownCheckpoint: string | null = null;
+// Failed loads authorize explicit recovery only, never automatic saving.
+let recoveryCheckpoint: string | null | undefined;
 
 function defaults(): StoredReaderState {
   return structuredClone(DEFAULT_READER_STATE);
@@ -133,7 +139,12 @@ function failure(code: "invalid" | "storage" | "unavailable" | "superseded", err
 }
 
 // Resolve only after transaction completion, not after the put request succeeds.
-function documentOperation(operation: "get" | "put" | "clear", key?: string, value?: ReaderDocument): Promise<unknown> {
+function documentOperation(
+  operation: "get" | "put" | "checkpoint",
+  key?: string,
+  value?: ReaderDocument,
+  publish?: (store: IDBObjectStore, stored: unknown) => ReaderStorageResult,
+): Promise<unknown> {
   return new Promise((resolve, reject) => {
     let database: IDBDatabase | undefined;
     let transaction: IDBTransaction | undefined;
@@ -167,14 +178,97 @@ function documentOperation(operation: "get" | "put" | "clear", key?: string, val
         try {
           transaction = database.transaction(DOCUMENT_STORE, operation === "get" ? "readonly" : "readwrite");
           const store = transaction.objectStore(DOCUMENT_STORE);
-          const item = operation === "get" ? store.get(key!) : operation === "put" ? store.put(value!, key!) : store.clear();
-          transaction.oncomplete = () => finish(undefined, item.result);
+          const item = operation === "put" ? store.put(value!, key!) : operation === "checkpoint"
+            ? store.getKey(key ?? "__checkpoint_lock__") : store.get(key!);
+          let result: ReaderStorageResult | undefined;
+          if (operation === "checkpoint") {
+            item.onsuccess = () => {
+              try { result = publish!(store, item.result); }
+              catch (error) {
+                transaction?.abort();
+                finish(error);
+              }
+            };
+          }
+          transaction.oncomplete = () => finish(undefined, operation === "checkpoint" ? result : item.result);
           transaction.onabort = () => finish(transaction?.error ?? new Error("Transaccion cancelada."));
           transaction.onerror = () => finish(transaction?.error ?? new Error("Error de IndexedDB."));
         } catch (error) { finish(error); }
       };
     } catch (error) { finish(error); }
   });
+}
+
+function conflict(): ReaderStorageResult {
+  return failure("storage", "Otra pestana actualizo o borro el estado. Recarga para recuperar el avance mas reciente antes de guardar; no se sobrescribieron sus cambios.");
+}
+
+function hasPendingClear(raw: string | null): boolean {
+  try { return raw !== null && JSON.parse(raw)?.pendingClear === true; }
+  catch { return false; }
+}
+
+function pendingClearError(): ReaderStorageResult {
+  return failure("storage", "Borrado pendiente en otra pestana. Espera a que termine y vuelve a cargar; no se puede guardar ni recuperar ese estado provisional.");
+}
+
+// The readwrite transaction serializes cooperating tabs, including reset. No book is rewritten here.
+async function publishCheckpoint(
+  checkpoint: z.infer<typeof checkpointSchema>,
+  expected: string | null,
+  sequence: number,
+  clear = false,
+): Promise<ReaderStorageResult> {
+  let published: string | undefined;
+  let clearCommitted = false;
+  const previousKnown = knownCheckpoint;
+  try {
+    const result = await documentOperation("checkpoint", checkpoint.documentKey ?? undefined, undefined, (store, stored) => {
+      if (sequence !== saveSequence) return failure("superseded", "Una solicitud posterior reemplazo este guardado.");
+      if (window.localStorage.getItem(CHECKPOINT_KEY) !== expected) return conflict();
+      if (checkpoint.documentKey !== null && stored !== checkpoint.documentKey) {
+        return failure("storage", "El documento ya no esta disponible. Recarga antes de volver a guardar.");
+      }
+      const raw = JSON.stringify({ ...checkpoint, revision: globalThis.crypto.randomUUID(), ...(clear ? { pendingClear: true } : {}) });
+      window.localStorage.setItem(CHECKPOINT_KEY, raw);
+      published = raw;
+      if (!clear) knownCheckpoint = raw;
+      // Publish first to detect quota failures; an abort restores this exact raw under the same lock.
+      if (clear) store.clear();
+      return { ok: true };
+    }) as ReaderStorageResult;
+    if (result.ok) {
+      if (clear && published !== undefined) {
+        clearCommitted = true;
+        // Keep pending visible throughout the commit/finalization gap, never as recoverable corruption.
+        const finalRaw = JSON.stringify({ ...checkpoint, revision: globalThis.crypto.randomUUID() });
+        const finalized = await documentOperation("checkpoint", undefined, undefined, () => {
+          if (window.localStorage.getItem(CHECKPOINT_KEY) !== published) return conflict();
+          window.localStorage.setItem(CHECKPOINT_KEY, finalRaw);
+          return { ok: true };
+        }) as ReaderStorageResult;
+        if (!finalized.ok) return finalized;
+        knownCheckpoint = finalRaw;
+      }
+      recoveryCheckpoint = undefined;
+    }
+    return result;
+  } catch (error) {
+    if (published !== undefined && !clearCommitted) {
+      try {
+        await documentOperation("checkpoint", undefined, undefined, () => {
+          // A queued writer may already have published: never roll it back.
+          if (window.localStorage.getItem(CHECKPOINT_KEY) !== published) return conflict();
+          if (expected === null) window.localStorage.removeItem(CHECKPOINT_KEY);
+          else window.localStorage.setItem(CHECKPOINT_KEY, expected);
+          return { ok: true };
+        });
+      } finally {
+        if (knownCheckpoint === published) knownCheckpoint = previousKnown;
+      }
+    }
+    throw error;
+  }
 }
 
 function consistent(state: StoredReaderState) {
@@ -187,9 +281,13 @@ function consistent(state: StoredReaderState) {
 export async function loadReaderState(): Promise<ReaderLoadResult> {
   if (typeof window === "undefined") return { ...failure("unavailable", "Almacenamiento no disponible."), state: defaults() };
   if (isClearing) return { ...failure("storage", "Borrado en curso; vuelve a intentar la carga."), state: defaults() };
+  const sequence = ++saveSequence;
+  recoveryCheckpoint = undefined;
   let state = defaults();
   try {
     const raw = window.localStorage.getItem(CHECKPOINT_KEY);
+    if (hasPendingClear(raw)) return { ...pendingClearError(), state };
+    recoveryCheckpoint = raw;
     if (raw !== null) {
       const parsed = checkpointSchema.safeParse(JSON.parse(raw));
       if (!parsed.success) return { ...failure("invalid", "Checkpoint invalido; no se modificaron los datos."), state };
@@ -206,6 +304,11 @@ export async function loadReaderState(): Promise<ReaderLoadResult> {
       }
       const restored = { document, progress: checkpoint.progress, preferences: checkpoint.preferences, session: checkpoint.session };
       if (!consistent(restored)) return { ...failure("invalid", "El avance no corresponde al documento."), state };
+      if (sequence !== saveSequence || window.localStorage.getItem(CHECKPOINT_KEY) !== raw) {
+        return { ...conflict(), state };
+      }
+      knownCheckpoint = raw;
+      recoveryCheckpoint = undefined;
       state = restored;
       documentWrite = document ? {
         reference: document, id: document.id, key: checkpoint.documentKey!, ready: true,
@@ -214,7 +317,13 @@ export async function loadReaderState(): Promise<ReaderLoadResult> {
       return { ok: true, state };
     }
     const legacy = window.localStorage.getItem(STORAGE_KEY);
-    if (legacy === null) return { ok: true, state };
+    if (window.localStorage.getItem(CHECKPOINT_KEY) !== null) return { ...conflict(), state };
+    knownCheckpoint = null;
+    if (legacy === null) {
+      documentWrite = undefined;
+      recoveryCheckpoint = undefined;
+      return { ok: true, state };
+    }
     const parsed = z.object({
       document: documentSchema.nullable().default(null),
       progress: progressSchema.partial().default({}),
@@ -242,8 +351,12 @@ export async function loadReaderState(): Promise<ReaderLoadResult> {
 export async function saveReaderState(state: StoredReaderState): Promise<ReaderStorageResult> {
   if (isClearing) return failure("storage", "Borrado en curso; vuelve a intentar el guardado.");
   const sequence = ++saveSequence;
+  const expected = knownCheckpoint;
   if (typeof window === "undefined") return failure("unavailable", "Almacenamiento no disponible.");
   try {
+    const current = window.localStorage.getItem(CHECKPOINT_KEY);
+    if (hasPendingClear(current)) return pendingClearError();
+    if (current !== expected) return conflict();
     const small = checkpointSchema.safeParse({
       version: 2, documentKey: null, documentId: state.document?.id ?? null,
       progress: state.progress, preferences: state.preferences, session: state.session,
@@ -281,8 +394,7 @@ export async function saveReaderState(state: StoredReaderState): Promise<ReaderS
     if (sequence !== saveSequence) return failure("superseded", "Una solicitud posterior reemplazo este guardado.");
     const checkpoint = small.data;
     checkpoint.documentKey = entry?.key ?? null;
-    window.localStorage.setItem(CHECKPOINT_KEY, JSON.stringify(checkpoint));
-    return { ok: true };
+    return await publishCheckpoint(checkpoint, expected, sequence);
   } catch {
     return failure("storage", "No se pudo guardar el avance. Revisa permisos y espacio disponible.");
   }
@@ -291,18 +403,21 @@ export async function saveReaderState(state: StoredReaderState): Promise<ReaderS
 /** Reset v2 explicitly; retain v1 and a null checkpoint so legacy data cannot reappear. */
 export async function clearReaderState(): Promise<ReaderStorageResult> {
   if (isClearing) return failure("storage", "Ya hay un borrado en curso.");
-  ++saveSequence;
-  documentWrite = undefined;
+  const sequence = ++saveSequence;
   if (typeof window === "undefined") return failure("unavailable", "Almacenamiento no disponible.");
   isClearing = true;
   try {
+    const current = window.localStorage.getItem(CHECKPOINT_KEY);
+    if (hasPendingClear(current)) return pendingClearError();
+    const expected = recoveryCheckpoint !== undefined && current === recoveryCheckpoint
+      ? recoveryCheckpoint : knownCheckpoint;
     const empty = defaults();
-    window.localStorage.setItem(CHECKPOINT_KEY, JSON.stringify({
+    const result = await publishCheckpoint({
       version: 2, documentKey: null, documentId: null,
       progress: empty.progress, preferences: empty.preferences, session: empty.session,
-    }));
-    await documentOperation("clear");
-    return { ok: true };
+    }, expected, sequence, true);
+    if (result.ok) documentWrite = undefined;
+    return result;
   } catch {
     return failure("storage", "No se pudo borrar todo el estado guardado.");
   } finally {

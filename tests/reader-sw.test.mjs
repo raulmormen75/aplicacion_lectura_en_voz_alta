@@ -1,56 +1,86 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { webcrypto } from "node:crypto";
 import { test } from "node:test";
 import { runInNewContext } from "node:vm";
+import { gzipSync } from "node:zlib";
+import { createPrecacheManifest, SHELL_PATH } from "../scripts/generate-reader-precache.mjs";
 
 const SW = readFileSync(new URL("../public/sw.js", import.meta.url), "utf8");
-const CURRENT = "lector-documental-raul-assets-v9";
-const SHELL = "lector-documental-raul-shell-v9";
 const ORIGIN = "https://reader.test";
+const PREFIX = "lector-documental-raul-core-";
+const COMPLETE = ORIGIN + "/reader-assets/offline-complete";
 
-function worker() {
+async function fixture(id = "a") {
+  const html = '<html><head><script src="/_next/static/' + id + '.js"></script>' +
+    '<link rel="stylesheet" href="/_next/static/' + id + '.css">' +
+    '<link rel="preload" as="font" href="/_next/static/font.woff2"></head>' +
+    '<body>Static shell ' + id + '</body></html>';
+  const files = new Map([
+    [SHELL_PATH, { body: html, type: "text/html; charset=utf-8" }],
+    ["/_next/static/" + id + ".js", { body: "hydrate-" + id, type: "application/javascript" }],
+    ["/_next/static/" + id + ".css", { body: "body{color:green}", type: "text/css" }],
+    ["/_next/static/font.woff2", { body: "font-bytes", type: "font/woff2" }],
+    ["/manifest.webmanifest", { body: JSON.stringify({ icons: [{ src: "/icons/icon.png" }] }), type: "application/manifest+json" }],
+    ["/icons/icon.png", { body: "icon-bytes", type: "image/png" }],
+  ]);
+  const manifest = await createPrecacheManifest({
+    html, buildId: id, workerSource: SW, buildManifest: { rootMainFiles: ["static/" + id + ".js"] },
+    readAsset: async (path) => {
+      if (!files.has(path)) throw Error("missing fixture asset");
+      return Buffer.from(files.get(path).body);
+    },
+  });
+  return { manifest, files };
+}
+
+function worker({ manifest, files }, stores = new Map()) {
   const events = {};
-  const stores = new Map();
   const deleted = [];
-  const control = { offline: false, status: 200, body: "asset", type: "application/javascript", fetches: 0, puts: 0, claims: 0, skips: 0 };
+  const control = { offline: false, fetches: [], puts: 0, claims: 0, skips: 0, overrides: new Map() };
   const key = (request) => typeof request === "string" ? new URL(request, ORIGIN).href : request.url;
   const caches = {
     async open(name) {
-      if (control.failOpen) throw new Error("cache denied");
+      if (control.failOpen) throw Error("cache denied");
       if (!stores.has(name)) stores.set(name, new Map());
       const store = stores.get(name);
       return {
         async match(request) { return store.get(key(request))?.clone(); },
         async put(request, response) {
-          if (control.failPut) throw new Error("cache full");
+          if (control.failPut || control.failMarker && key(request) === COMPLETE) throw Error("cache full");
           control.puts++;
           store.set(key(request), response.clone());
-        },
-        async addAll(paths) {
-          if (control.failInstall) throw new Error("precache failed");
-          for (const path of paths) store.set(key(path), new Response("precache"));
         },
       };
     },
     async keys() { return [...stores.keys()]; },
     async delete(name) { deleted.push(name); return stores.delete(name); },
   };
+  const self = {
+    location: { origin: ORIGIN },
+    addEventListener: (name, handler) => { events[name] = handler; },
+    skipWaiting: async () => { control.skips++; },
+    clients: { claim: async () => { control.claims++; } },
+  };
   runInNewContext(SW, {
-    URL, Request, Response, caches,
-    self: {
-      location: { origin: ORIGIN },
-      addEventListener: (name, handler) => { events[name] = handler; },
-      skipWaiting: async () => { control.skips++; },
-      clients: { claim: async () => { control.claims++; } },
+    URL, Request, Response, Uint8Array, AbortController, setTimeout, clearTimeout, crypto: webcrypto, caches, self,
+    importScripts(path) {
+      assert.equal(path, "/reader-assets/offline-manifest.js");
+      self.__READER_PRECACHE = manifest;
     },
-    fetch: async () => {
-      control.fetches++;
-      if (control.offline) throw new Error("offline");
-      const response = new Response(control.body, {
-        status: control.status,
-        headers: { "content-type": control.type, "cache-control": control.cacheControl ?? "public" },
+    fetch: async (request) => {
+      const url = key(request);
+      control.fetches.push(url);
+      if (control.offline) throw Error("offline");
+      const path = new URL(url).pathname;
+      const asset = files.get(path) ?? { body: "network-only", type: "application/javascript" };
+      const override = control.overrides.get(path) ?? {};
+      if (override.error) throw Error("network failed");
+      const response = new Response(override.body ?? asset.body, {
+        status: override.status ?? 200,
+        headers: { "content-type": override.type ?? asset.type, "cache-control": override.cacheControl ?? "public", ...override.headers },
       });
-      if (control.redirected) Object.defineProperty(response, "redirected", { value: true });
+      if (override.redirected) Object.defineProperty(response, "redirected", { value: true });
       return response;
     },
   });
@@ -60,205 +90,217 @@ function worker() {
     await job;
   };
   const request = async (path, options = {}) => {
-    let result;
-    const lifetime = [];
+    let response;
     events.fetch({
-      request: {
-        url: new URL(path, ORIGIN).href,
-        method: options.method ?? "GET",
-        mode: options.mode ?? "cors",
-        headers: new Headers(options.headers),
-      },
-      respondWith: (promise) => { result = promise; },
-      waitUntil: (promise) => { lifetime.push(promise); },
+      request: { url: new URL(path, ORIGIN).href, method: options.method ?? "GET", mode: options.mode ?? "cors", headers: new Headers(options.headers) },
+      respondWith: (promise) => { response = promise; },
     });
-    const response = await result;
-    await Promise.all(lifetime);
     return response;
   };
-  return { control, caches, stores, deleted, lifecycle, request };
+  return { control, caches, stores, deleted, lifecycle, request, name: PREFIX + manifest.version };
 }
 
-test("SW activation deletes only old reader app cache versions", async () => {
-  const w = worker();
-  const protectedNames = ["piper-models", "onnx-runtime", "other-app-v7", "lector-documental-raul-piper-v1", CURRENT, SHELL];
-  for (const name of [...protectedNames, "lector-documental-raul-v7", "lector-documental-raul-assets-v6", "lector-documental-raul-shell-v8"]) {
-    await w.caches.open(name);
-  }
-  await w.lifecycle("activate");
-  assert.deepEqual(w.deleted.sort(), ["lector-documental-raul-assets-v6", "lector-documental-raul-shell-v8", "lector-documental-raul-v7"]);
-  for (const name of protectedNames) assert.equal(w.stores.has(name), true);
-  assert.equal(w.control.claims, 1);
-});
-
-test("SW failed precache rejects install and does not skip waiting", async () => {
-  const w = worker();
-  w.control.failInstall = true;
-  await assert.rejects(w.lifecycle("install"));
-  assert.equal(w.control.skips, 0);
-  assert.equal(w.deleted.length, 0);
-});
-
-test("SW successful install precaches root HTML separately from assets", async () => {
-  const w = worker();
-  w.control.type = "text/html; charset=utf-8";
-  w.control.body = "<html>root</html>";
+test("first install precaches complete HTML/JS/CSS/fonts without visiting any asset first", async () => {
+  const data = await fixture();
+  const w = worker(data);
   await w.lifecycle("install");
-  assert.equal(w.control.skips, 1);
-  assert.equal(w.stores.get(CURRENT).has(ORIGIN + "/"), false);
-  assert.equal(w.stores.get(CURRENT).has(ORIGIN + "/manifest.webmanifest"), true);
-  assert.equal(await w.stores.get(SHELL).get(ORIGIN + "/").text(), "<html>root</html>");
-});
-
-test("SW bypasses API, navigation, remote models, Piper, WASM, RSC and ranges", async () => {
-  const w = worker();
-  for (const [url, options] of [
-    ["/other-page", { mode: "navigate" }], ["/api/integrations/status"], ["/api/auth/session"],
-    ["https://cdn.test/_next/static/app.js"], ["/models/voice.onnx"], ["/piper/voice.json"],
-    ["/_next/static/engine.wasm"], ["/_next/image?url=test"],
-    ["/_next/static/app.js?_rsc=1"], ["/_next/static/app.js", { headers: { rsc: "1" } }],
-    ["/_next/static/app.js", { headers: { range: "bytes=0-100" } }],
-    ["/_next/static/app.js", { method: "POST" }],
-  ]) assert.equal(await w.request(url, options), undefined, url);
-  assert.equal(w.control.fetches, 0);
-  assert.equal(w.stores.size, 0);
-});
-
-test("SW root HTML is network-first and reloads offline from its own shell cache", async () => {
-  const w = worker();
-  w.control.type = "text/html; charset=utf-8";
-  w.control.body = "<html>first build</html>";
-  await w.request("/", { mode: "navigate" });
-  w.control.body = "<html>new build</html>";
-  assert.equal(await (await w.request("/", { mode: "navigate" })).text(), "<html>new build</html>");
+  assert.equal(w.control.fetches.length, data.manifest.entries.length);
+  assert.equal(w.control.skips, 0);
+  assert.ok(w.stores.get(w.name).has(COMPLETE));
+  await w.lifecycle("activate");
+  assert.equal(w.control.claims, 1);
   w.control.offline = true;
-  assert.equal(await (await w.request("/", { mode: "navigate" })).text(), "<html>new build</html>");
-  assert.equal(w.control.fetches, 3);
-  assert.equal(w.stores.has(CURRENT), false);
-});
-
-test("SW shell cannot intercept APIs, assets, RSC, query variants or remote navigation", async () => {
-  const w = worker();
-  w.control.type = "text/html";
-  await w.request("/", { mode: "navigate" });
-  w.control.offline = true;
-  for (const [url, options] of [
-    ["/api/auth/session", { mode: "navigate" }],
-    ["/", {}], ["/?_rsc=1", { mode: "navigate" }],
-    ["/?view=private", { mode: "navigate" }],
-    ["/", { mode: "navigate", headers: { rsc: "1" } }],
-    ["/", { mode: "navigate", headers: { accept: "text/x-component" } }],
-    ["/", { mode: "navigate", headers: { "next-router-prefetch": "1" } }],
-    ["/", { mode: "navigate", headers: { "next-router-state-tree": "tree" } }],
-    ["/", { mode: "navigate", headers: { authorization: "Bearer test" } }],
-    ["https://external.test/", { mode: "navigate" }],
-  ]) assert.equal(await w.request(url, options), undefined, url);
-  assert.equal((await w.request("/_next/static/missing.js")).type, "error");
-});
-
-test("SW invalid shell responses never replace valid HTML; 5xx uses the last valid shell", async () => {
-  for (const change of [
-    { type: "text/x-component" }, { type: "application/json" }, { status: 404 },
-    { status: 500 }, { redirected: true }, { cacheControl: "private" }, { cacheControl: "no-store" },
-  ]) {
-    const w = worker();
-    w.control.type = "text/html";
-    w.control.body = "<html>valid</html>";
-    await w.request("/", { mode: "navigate" });
-    Object.assign(w.control, change, { body: "invalid replacement" });
-    const online = await w.request("/", { mode: "navigate" });
-    if (change.status === 500) assert.equal(await online.text(), "<html>valid</html>");
-    w.control.offline = true;
-    assert.equal(await (await w.request("/", { mode: "navigate" })).text(), "<html>valid</html>");
+  assert.equal(await (await w.request("/", { mode: "navigate" })).text(), data.files.get(SHELL_PATH).body);
+  for (const entry of data.manifest.entries.filter((entry) => entry.url !== SHELL_PATH)) {
+    assert.equal(await (await w.request(entry.url)).text(), data.files.get(entry.url).body);
   }
 });
 
-test("SW rejects installation if the root is not public successful HTML", async () => {
-  for (const change of [
-    { type: "application/json" }, { status: 500 }, { redirected: true }, { cacheControl: "private" },
-  ]) {
-    const w = worker();
-    Object.assign(w.control, { type: "text/html" }, change);
+test("partial first install cannot activate or leave a committed shell", async () => {
+  const w = worker(await fixture());
+  w.control.overrides.set("/_next/static/a.css", { status: 500 });
+  await assert.rejects(w.lifecycle("install"));
+  assert.equal(w.stores.has(w.name), false);
+  await assert.rejects(w.lifecycle("activate"));
+  assert.equal(w.control.claims, 0);
+  assert.equal(w.control.skips, 0);
+});
+
+test("update failure preserves the complete old generation and unrelated caches", async () => {
+  const stores = new Map([["piper-models", new Map()], ["other-app", new Map()], ["lector-documental-raul-assets-v9", new Map()]]);
+  const oldData = await fixture("a");
+  const old = worker(oldData, stores);
+  await old.lifecycle("install");
+  await old.lifecycle("activate");
+  const next = worker(await fixture("b"), stores);
+  next.control.overrides.set("/_next/static/b.js", { error: true });
+  await assert.rejects(next.lifecycle("install"));
+  assert.deepEqual(next.deleted, [next.name]);
+  assert.ok(stores.has(old.name));
+  assert.ok(stores.has("piper-models"));
+  assert.ok(stores.has("lector-documental-raul-assets-v9"));
+  old.control.offline = true;
+  assert.equal(await (await old.request("/", { mode: "navigate" })).text(), oldData.files.get(SHELL_PATH).body);
+  assert.equal(await (await old.request("/_next/static/a.js")).text(), "hydrate-a");
+});
+
+test("successful update waits naturally; activation retains chunks used by old tabs", async () => {
+  const stores = new Map();
+  const oldData = await fixture("a");
+  const old = worker(oldData, stores);
+  await old.lifecycle("install");
+  const nextData = await fixture("b");
+  const next = worker(nextData, stores);
+  await next.lifecycle("install");
+  assert.equal(next.control.skips, 0);
+  assert.equal(next.control.claims, 0);
+  old.control.offline = true;
+  assert.equal(await (await old.request("/", { mode: "navigate" })).text(), oldData.files.get(SHELL_PATH).body);
+  await next.lifecycle("activate");
+  assert.equal(next.deleted.length, 0);
+  next.control.offline = true;
+  assert.equal(await (await next.request("/", { mode: "navigate" })).text(), nextData.files.get(SHELL_PATH).body);
+  assert.equal(await (await next.request("/_next/static/a.js")).text(), "hydrate-a");
+});
+
+test("new network HTML never overwrites the offline build-pinned shell", async () => {
+  const data = await fixture();
+  const w = worker(data);
+  await w.lifecycle("install");
+  w.control.overrides.set("/", { body: "<html>new deployment</html>", type: "text/html" });
+  assert.equal(await (await w.request("/", { mode: "navigate" })).text(), "<html>new deployment</html>");
+  w.control.offline = true;
+  assert.equal(await (await w.request("/", { mode: "navigate" })).text(), data.files.get(SHELL_PATH).body);
+});
+
+test("commit marker write failure and quota errors abort installation", async () => {
+  for (const flag of ["failPut", "failMarker"]) {
+    const w = worker(await fixture());
+    w.control[flag] = true;
     await assert.rejects(w.lifecycle("install"));
     assert.equal(w.control.skips, 0);
-    assert.equal(w.deleted.length, 0);
+    assert.equal(w.stores.has(w.name), false);
   }
 });
 
-test("SW root fallback never reads another cache version or non-HTML entries", async () => {
-  const w = worker();
-  for (const name of ["other-app", "lector-documental-raul-shell-v8", CURRENT]) {
-    const cache = await w.caches.open(name);
-    await cache.put(ORIGIN + "/", new Response("old HTML", { headers: { "content-type": "text/html" } }));
+test("precache rejects private, redirected, partial, HTML-as-JS and wrong-build bytes", async () => {
+  for (const override of [
+    { status: 206 }, { status: 404 }, { redirected: true }, { cacheControl: "private" },
+    { cacheControl: "no-store" }, { type: "text/html" }, { body: "wrongbytes" },
+    { body: "x".repeat(100) }, { body: "x" },
+  ]) {
+    const w = worker(await fixture());
+    w.control.overrides.set("/_next/static/a.js", override);
+    await assert.rejects(w.lifecycle("install"));
+    assert.equal(w.control.skips, 0);
+    assert.equal(w.stores.has(w.name), false);
   }
-  const shell = await w.caches.open(SHELL);
-  await shell.put(ORIGIN + "/", new Response("rsc", { headers: { "content-type": "text/x-component" } }));
+});
+
+test("compressed Content-Length does not reject valid decoded bytes or bypass body validation", async () => {
+  const data = await fixture();
+  const path = "/_next/static/a.js";
+  const body = data.files.get(path).body;
+  const headers = { "content-encoding": "gzip", "content-length": String(gzipSync(body).byteLength) };
+  assert.ok(Number(headers["content-length"]) > Buffer.byteLength(body));
+  const w = worker(data);
+  // Browser Fetch already decoded the body, but retains the transfer headers.
+  w.control.overrides.set(path, { body, headers });
+  await w.lifecycle("install");
+  await w.lifecycle("activate");
+  w.control.offline = true;
+  assert.equal(await (await w.request(path)).text(), body);
+  for (const invalid of [body + "extra", "x", "x".repeat(body.length)]) {
+    const failed = worker(data);
+    failed.control.overrides.set(path, { body: invalid, headers });
+    await assert.rejects(failed.lifecycle("install"));
+    assert.equal(failed.stores.has(failed.name), false);
+  }
+});
+
+test("activation and offline HTML require every core entry, not just a marker", async () => {
+  const w = worker(await fixture());
+  await w.lifecycle("install");
+  w.stores.get(w.name).delete(ORIGIN + "/_next/static/a.js");
+  await assert.rejects(w.lifecycle("activate"));
+  assert.equal(w.control.claims, 0);
   w.control.offline = true;
   assert.equal((await w.request("/", { mode: "navigate" })).type, "error");
 });
 
-test("SW shell storage failures preserve online navigation", async () => {
-  for (const flag of ["failOpen", "failPut"]) {
-    const w = worker();
-    w.control.type = "text/html";
-    w.control.body = "<html>online</html>";
-    w.control[flag] = true;
-    assert.equal(await (await w.request("/", { mode: "navigate" })).text(), "<html>online</html>");
-  }
+test("APIs, document text, models, WASM, RSC and authenticated requests bypass the cache", async () => {
+  const w = worker(await fixture());
+  for (const [url, options] of [
+    ["/api/documents/process"], ["/api/text/reconstruct"], ["/api/auth/session"],
+    ["https://cdn.test/_next/static/a.js"], ["/models/voice.onnx"], ["/piper/voice.json"],
+    ["/reader-assets/tesseract.worker.min.js"], ["/_next/static/engine.wasm"], ["/_next/image?url=x"],
+    ["/_next/static/a.js?_rsc=1"], ["/_next/static/a.js", { headers: { rsc: "1" } }],
+    ["/_next/static/a.js", { headers: { range: "bytes=0-100" } }], ["/_next/static/a.js", { method: "POST" }],
+    ["/", { mode: "navigate", headers: { authorization: "Bearer test" } }],
+    ["/", { mode: "navigate", headers: { accept: "text/x-component" } }],
+    ["/", { mode: "navigate", headers: { "next-router-prefetch": "1" } }],
+    ["/", { mode: "navigate", headers: { "next-router-state-tree": "tree" } }],
+    ["/?view=private", { mode: "navigate" }], ["/other", { mode: "navigate" }],
+  ]) assert.equal(await w.request(url, options), undefined, url);
+  assert.equal(w.control.fetches.length, 0);
+  assert.equal(w.stores.size, 0);
 });
 
-test("SW caches successful immutable assets and serves the same exact URL offline", async () => {
-  const w = worker();
-  const path = "/_next/static/chunks/abc123.js";
-  assert.equal(await (await w.request(path)).text(), "asset");
-  w.control.offline = true;
-  assert.equal(await (await w.request(path)).text(), "asset");
-  assert.equal(w.control.fetches, 1);
-  assert.equal((await w.request("/_next/static/chunks/different.js")).type, "error");
-});
-
-test("SW public assets refresh online; a 500 cannot poison a previous cached success", async () => {
-  const w = worker();
-  await w.request("/manifest.webmanifest");
-  w.control.body = "fresh";
-  assert.equal(await (await w.request("/manifest.webmanifest")).text(), "fresh");
-  w.control.status = 500;
-  w.control.body = "server error";
-  assert.equal((await w.request("/manifest.webmanifest")).status, 500);
-  w.control.offline = true;
-  assert.equal(await (await w.request("/manifest.webmanifest")).text(), "fresh");
-});
-
-test("SW never caches HTML, partial responses or private/no-store assets", async () => {
-  for (const options of [
-    { type: "Text/Html; charset=utf-8" }, { status: 206 },
-    { cacheControl: "private, max-age=100" }, { cacheControl: "no-store" },
-  ]) {
-    const w = worker();
-    Object.assign(w.control, options);
-    await w.request("/_next/static/app.js");
-    assert.equal(w.control.puts, 0);
-  }
-});
-
-test("SW missing asset never receives HTML from another cache or the app root", async () => {
-  const w = worker();
+test("unknown lazy JS is network-only; no arbitrary or foreign cache fallback", async () => {
+  const w = worker(await fixture());
+  await w.request("/_next/static/piper-lazy.js");
+  assert.equal(w.control.puts, 0);
   const foreign = await w.caches.open("other-app");
-  await foreign.put(ORIGIN + "/", new Response("<html>old shell</html>"));
-  await foreign.put(ORIGIN + "/_next/static/app.js", new Response("old script"));
+  await foreign.put("/_next/static/missing.js", new Response("foreign"));
   w.control.offline = true;
-  const result = await w.request("/_next/static/app.js");
-  assert.equal(result.type, "error");
-  assert.equal(result.status, 0);
+  assert.equal((await w.request("/_next/static/missing.js")).type, "error");
+  assert.equal((await w.request("/", { mode: "navigate" })).type, "error");
 });
 
-test("SW cache open/put failure does not turn an online response into a network failure", async () => {
-  for (const flag of ["failOpen", "failPut"]) {
-    const w = worker();
-    w.control[flag] = true;
-    const response = await w.request("/_next/static/app.js");
-    assert.equal(response.status, 200);
-    assert.equal(await response.text(), "asset");
-    assert.equal(w.control.fetches, 1);
+test("cache failures preserve online responses and valid offline core handles 5xx", async () => {
+  const data = await fixture();
+  const w = worker(data);
+  await w.lifecycle("install");
+  w.control.overrides.set("/", { status: 503 });
+  assert.equal(await (await w.request("/", { mode: "navigate" })).text(), data.files.get(SHELL_PATH).body);
+  w.control.failOpen = true;
+  w.control.overrides.set("/", { body: "online", type: "text/html" });
+  assert.equal(await (await w.request("/", { mode: "navigate" })).text(), "online");
+  assert.equal(await (await w.request("/_next/static/a.js")).text(), "hydrate-a");
+});
+
+test("generator uses structured HTML and JSON; includes exact query URLs and runtime files", async () => {
+  const files = new Map([
+    ["/_next/static/main.js?v=1", "main"], ["/_next/static/runtime.js", "runtime"],
+    ["/_next/static/main.css", "css"], ["/manifest.webmanifest", '{"icons":[]}'],
+  ]);
+  const manifest = await createPrecacheManifest({
+    html: '<html><script src="/_next/static/main.js?v=1"></script><link href="/_next/static/main.css" rel="stylesheet"></html>',
+    buildId: "build", workerSource: SW, buildManifest: { rootMainFiles: ["static/runtime.js"] },
+    readAsset: async (path) => Buffer.from(files.get(path)),
+  });
+  assert.ok(manifest.entries.some((entry) => entry.url === "/_next/static/main.js?v=1"));
+  assert.ok(manifest.entries.some((entry) => entry.url === "/_next/static/runtime.js"));
+  assert.match(manifest.version, /^[a-f0-9]{64}$/);
+  assert.ok(manifest.entries.every((entry) => entry.bytes > 0 && /^[a-f0-9]{64}$/.test(entry.sha256)));
+});
+
+test("generator rejects external resources, large models, missing files and oversized core assets", async () => {
+  for (const source of ["https://cdn.test/main.js", "/models/model.onnx", "/_next/static/engine.wasm"]) {
+    await assert.rejects(createPrecacheManifest({
+      html: '<script src="' + source + '"></script>', buildId: "build", workerSource: SW,
+      buildManifest: {}, readAsset: async () => Buffer.from('{"icons":[]}'),
+    }));
   }
+  await assert.rejects(createPrecacheManifest({
+    html: '<script src="/_next/static/a.js"></script><link rel="stylesheet" href="/_next/static/a.css">',
+    buildId: "build", workerSource: SW, buildManifest: {},
+    readAsset: async (path) => path === "/manifest.webmanifest" ? Buffer.from('{"icons":[]}') : Buffer.alloc(2_000_001),
+  }));
+});
+
+test("generated version changes with worker logic, HTML or build identity", async () => {
+  const a = await fixture("a");
+  const b = await fixture("b");
+  assert.notEqual(a.manifest.version, b.manifest.version);
 });

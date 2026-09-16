@@ -63,3 +63,15 @@ npm run lint
 npm test
 npm run build
 ```
+
+Comprobación offline aislada, con Microsoft Edge instalado y un servidor de producción local activo:
+
+```bash
+node tests/browser-offline.mjs http://127.0.0.1:3012/
+```
+
+La prueba usa un contexto temporal, nunca el perfil personal. Después de una primera visita completa, desactiva la red y comprueba la interfaz, el icono y la preparación de texto. No acredita voces ni OCR sin descargar sus recursos previamente.
+
+El paso `postbuild` genera un núcleo offline de HTML, JavaScript, estilos e iconos en `public/reader-assets/`; se verifica como una unidad antes de activarlo. Las actualizaciones esperan al cierre de las pestañas anteriores. Las cachés antiguas se conservan para no romper pestañas abiertas; el navegador puede desalojarlas por falta de espacio. No se guardan documentos ni respuestas API en esta caché.
+
+Si otra pestaña modifica el avance, una pestaña desactualizada muestra un aviso para recargar y no sobrescribe esos cambios. El guardado sigue siendo local al navegador y dispositivo; no implica sincronización entre equipos.
