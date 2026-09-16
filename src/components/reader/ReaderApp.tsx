@@ -37,6 +37,7 @@ import {
   saveReaderState,
 } from "@/lib/reader/storage";
 import { synthesizePiperSpeech } from "@/lib/reader/piper";
+import { buildPiperTimeline, piperWordAtTime } from "@/lib/reader/piper-timing";
 import type { PiperStage, PiperStatusUpdate } from "@/lib/reader/piper";
 import type {
   PlaybackRate,
@@ -125,6 +126,12 @@ export function ReaderApp() {
     gptOssReady: false,
   });
   const [isHydrated, setIsHydrated] = useState(false);
+  const [storageWarning, setStorageWarning] = useState("");
+  const processingAbortRef = useRef<AbortController | null>(null);
+  const voiceAbortRef = useRef<AbortController | null>(null);
+  const focusDockRef = useRef<HTMLElement | null>(null);
+  const voiceDialogRef = useRef<HTMLDialogElement | null>(null);
+  const storageEnabledRef = useRef(false);
   const utteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
   const activeSegmentRef = useRef<{
     startWord: number;
@@ -148,6 +155,7 @@ export function ReaderApp() {
   const selectedVoiceModel: VoiceModelId =
     preferences.voiceId === PIPER_VOICE_MODEL_ID ? PIPER_VOICE_MODEL_ID : STANDARD_VOICE_MODEL_ID;
   const selectedVoiceModelRef = useRef<VoiceModelId>(selectedVoiceModel);
+  const playbackRateRef = useRef<PlaybackRate>(preferences.rate);
   const shouldShowTextReview =
     document?.quality.status !== "ready" && document?.quality.ocrAvailable === true;
 
@@ -167,7 +175,11 @@ export function ReaderApp() {
 
   const stopPiperAudio = useCallback(() => {
     clearPiperProgressTracker();
-    piperAudioRef.current?.pause();
+    if (piperAudioRef.current) {
+      piperAudioRef.current.onended = null;
+      piperAudioRef.current.onerror = null;
+      piperAudioRef.current.pause();
+    }
     piperAudioRef.current = null;
     piperWordTimelineRef.current = [];
 
@@ -181,6 +193,8 @@ export function ReaderApp() {
     (advanceSession = true) => {
       shouldContinuePlaybackRef.current = false;
       if (advanceSession) playbackSessionRef.current += 1;
+      voiceAbortRef.current?.abort();
+      voiceAbortRef.current = null;
       window.speechSynthesis?.cancel();
       stopPiperAudio();
       clearProgressTimer();
@@ -206,8 +220,9 @@ export function ReaderApp() {
   const visibleTextBlocks = useMemo(() => {
     if (!document || tokens.length === 0) return [];
 
-    const startWord = Math.max(0, currentWord - READER_WINDOW_BEFORE);
-    const endWord = Math.min(tokens.length, currentWord + READER_WINDOW_AFTER);
+    const windowAnchor = Math.floor(currentWord / READER_WINDOW_BEFORE) * READER_WINDOW_BEFORE;
+    const startWord = Math.max(0, windowAnchor - READER_WINDOW_BEFORE);
+    const endWord = Math.min(tokens.length, windowAnchor + READER_WINDOW_AFTER);
     const visibleWords = tokens.slice(startWord, endWord);
     const windowStart = visibleWords[0]?.start ?? 0;
     const windowEnd = visibleWords.at(-1)?.end ?? document.cleanText.length;
@@ -234,8 +249,12 @@ export function ReaderApp() {
     preferences.rate,
   );
   useEffect(() => {
-    window.queueMicrotask(() => {
-      setState(loadReaderState());
+    let mounted = true;
+    void loadReaderState().then((result) => {
+      if (!mounted) return;
+      setState(result.state);
+      storageEnabledRef.current = result.ok;
+      setStorageWarning(result.ok ? "" : result.error);
       setIsHydrated(true);
     });
 
@@ -254,6 +273,8 @@ export function ReaderApp() {
 
     return () => {
       window.speechSynthesis?.removeEventListener?.("voiceschanged", refreshVoices);
+      mounted = false;
+      processingAbortRef.current?.abort();
       stopPiperAudio();
       stopPlayback();
     };
@@ -262,6 +283,11 @@ export function ReaderApp() {
   useEffect(() => {
     selectedVoiceModelRef.current = selectedVoiceModel;
   }, [selectedVoiceModel]);
+
+  useEffect(() => {
+    const dialog = voiceDialogRef.current;
+    if (voiceStartup?.visible && dialog && !dialog.open) dialog.showModal();
+  }, [voiceStartup?.visible]);
 
   useEffect(() => {
     let revealTimer: number | null = null;
@@ -284,6 +310,50 @@ export function ReaderApp() {
   }, [currentWord]);
 
   useEffect(() => {
+    const root = globalThis.document.documentElement;
+    const dock = focusDockRef.current;
+    if (!dock || preferences.readingMode !== "focus" || !focusControlsVisible) {
+      root.style.setProperty("--focus-dock-height", "0px");
+      return;
+    }
+    const measure = () => root.style.setProperty("--focus-dock-height", `${dock.getBoundingClientRect().height + 20}px`);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(dock);
+    return () => { observer.disconnect(); root.style.removeProperty("--focus-dock-height"); };
+  }, [preferences.readingMode, focusControlsVisible]);
+
+  useEffect(() => {
+    let nativeFullscreen = Boolean(globalThis.document.fullscreenElement);
+    const syncFullscreen = () => {
+      const active = Boolean(globalThis.document.fullscreenElement);
+      if (nativeFullscreen && !active) {
+        setState((current) => ({ ...current, preferences: { ...current.preferences, readingMode: "standard" } }));
+      }
+      nativeFullscreen = active;
+    };
+    const escape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      if (isVoiceMenuOpen) { setIsVoiceMenuOpen(false); return; }
+      setState((current) => current.preferences.readingMode === "focus" ? { ...current, preferences: { ...current.preferences, readingMode: "standard" } } : current);
+    };
+    globalThis.document.addEventListener("fullscreenchange", syncFullscreen);
+    window.addEventListener("keydown", escape);
+    return () => {
+      globalThis.document.removeEventListener("fullscreenchange", syncFullscreen);
+      window.removeEventListener("keydown", escape);
+    };
+  }, [isVoiceMenuOpen]);
+
+  useEffect(() => {
+    if (!isVoiceMenuOpen) return;
+    const menus = globalThis.document.querySelectorAll<HTMLElement>(".voice-model-menu");
+    for (const menu of menus) {
+      if (menu.getBoundingClientRect().width > 0) { menu.querySelector<HTMLButtonElement>("button[aria-checked=true]")?.focus(); break; }
+    }
+  }, [isVoiceMenuOpen]);
+
+  useEffect(() => {
     const activeWord = globalThis.document.querySelector<HTMLSpanElement>(
       ".document-text .active-word",
     );
@@ -294,12 +364,15 @@ export function ReaderApp() {
     if (readingPane) {
       const paneRect = readingPane.getBoundingClientRect();
       const wordRect = activeWord.getBoundingClientRect();
+      // Keep the active line visible without restarting smooth scroll on every word.
+      if (wordRect.top >= paneRect.top + readingPane.clientHeight * 0.18 &&
+          wordRect.bottom <= paneRect.top + readingPane.clientHeight * 0.72) return;
       const nextTop =
         readingPane.scrollTop + wordRect.top - paneRect.top - readingPane.clientHeight * 0.46;
 
       readingPane.scrollTo({
         top: Math.max(0, nextTop),
-        behavior: "smooth",
+        behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
       });
       return;
     }
@@ -309,7 +382,7 @@ export function ReaderApp() {
       block: "center",
       inline: "nearest",
     });
-  }, [currentWord]);
+  }, [currentWord, preferences.readingMode]);
 
   useEffect(() => {
     if (!isHydrated || preferences.readingMode !== "focus") return;
@@ -350,8 +423,9 @@ export function ReaderApp() {
   }, [isHydrated, preferences.readingMode]);
 
   useEffect(() => {
-    if (!isHydrated) return;
-    saveReaderState({
+    if (!isHydrated || !storageEnabledRef.current) return;
+    let active = true;
+    void saveReaderState({
       ...state,
       progress: {
         ...state.progress,
@@ -359,7 +433,11 @@ export function ReaderApp() {
         estimatedRemainingSeconds: remainingSeconds,
         updatedAt: new Date().toISOString(),
       },
+    }).then((result) => {
+      if (active && !result.ok && result.code !== "superseded") setStorageWarning(result.error);
+      else if (active && result.ok) setStorageWarning("");
     });
+    return () => { active = false; };
   }, [isHydrated, percentage, remainingSeconds, state]);
 
   function updatePreferences(next: Partial<ReaderPreferences>) {
@@ -373,6 +451,7 @@ export function ReaderApp() {
   }
 
   function setDocument(nextDocument: ReaderDocument) {
+    storageEnabledRef.current = true;
     stopPlayback();
     setIsPlaying(false);
 
@@ -416,7 +495,7 @@ export function ReaderApp() {
   }
 
   async function processFile(file: File | null) {
-    if (!file) return;
+    if (!file || processingAbortRef.current) return;
 
     if (file.size <= 0) {
       setStatusMessage("El archivo llegó vacío. En móvil, descarga el PDF desde Drive y vuelve a seleccionarlo.");
@@ -429,64 +508,61 @@ export function ReaderApp() {
     }
 
     setIsProcessing(true);
+    const controller = new AbortController();
+    processingAbortRef.current = controller;
     setStatusMessage("Extrayendo texto del archivo.");
 
     try {
-      const formData = new FormData();
-      formData.append("file", file, file.name || "documento.pdf");
-      const response = await fetch("/api/documents/process", {
-        method: "POST",
-        body: formData,
+      const { importFile } = await import("@/lib/reader/import-file");
+      const result = await importFile(file, {
+        signal: controller.signal,
+        onStatus: (message) => { if (!controller.signal.aborted) setStatusMessage(message); },
       });
-      const data = await readProcessResponse(response, "No se pudo procesar el archivo.");
-
-      if (data.document) {
-        setDocument(data.document);
+      if (controller.signal.aborted) return;
+      const prepared = createDocumentFromText({
+        title: file.name || "Documento importado", source: "file", sourceLabel: file.type || "archivo local",
+        text: result.text, qualityStatus: result.needsReview ? "needs-review" : "ready",
+        qualityMessage: result.usedOcr ? "Texto obtenido por OCR. Revisa nombres y cifras." : "Archivo procesado en este dispositivo.",
+        ocrAvailable: result.needsReview,
+      });
+      if (!prepared.wordCount) {
+        setStatusMessage("No se encontró texto para escuchar. El documento anterior se conserva.");
         return;
       }
-
-      setStatusMessage(data.error ?? "No se pudo procesar el archivo.");
-    } catch {
-      setStatusMessage("No se pudo conectar con el procesador de documentos.");
+      setDocument(prepared);
+      setStatusMessage(result.usedOcr ? "OCR terminado. Revisa nombres y cifras antes de escuchar." : "Archivo listo para escuchar.");
+    } catch (error) {
+      setStatusMessage(controller.signal.aborted ? "Importación cancelada." : error instanceof Error ? error.message : "No se pudo procesar el archivo.");
     } finally {
+      if (processingAbortRef.current === controller) processingAbortRef.current = null;
       setIsProcessing(false);
     }
   }
 
   async function processText() {
-    setIsProcessing(true);
+    if (processingAbortRef.current) return;
+    if (!pastedText.trim()) { setStatusMessage("Pega texto antes de continuar."); return; }
     setStatusMessage("Limpiando texto pegado.");
     try {
-      const response = await fetch("/api/documents/process", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          source: "pastedText",
-          title: "Texto pegado",
-          text: pastedText,
-        }),
-      });
-      const data = await readProcessResponse(response, "No se pudo procesar el texto.");
-
-      if (data.document) {
-        setPastedText(data.document.cleanText);
-        setDocument(data.document);
-      } else {
-        setStatusMessage(data.error ?? "No se pudo procesar el texto.");
-      }
+      const prepared = createDocumentFromText({source: "pastedText", title: "Texto pegado", sourceLabel: "Texto pegado", text: pastedText, ocrAvailable: false});
+      if (!prepared.wordCount) { setStatusMessage("No se encontró texto para escuchar."); return; }
+      setPastedText(prepared.cleanText);
+      setDocument(prepared);
     } catch {
-      setStatusMessage("No se pudo conectar con el procesador de texto.");
-    } finally {
-      setIsProcessing(false);
+      setStatusMessage("No se pudo preparar el texto. Prueba con un fragmento menor.");
     }
   }
 
   async function processUrl() {
+    if (processingAbortRef.current) return;
+    const controller = new AbortController();
+    processingAbortRef.current = controller;
     const targetUrl = url;
     setIsProcessing(true);
     setStatusMessage("Leyendo sitio web.");
     try {
       const response = await fetch("/api/documents/process", {
+        signal: controller.signal,
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
@@ -496,11 +572,13 @@ export function ReaderApp() {
       });
       const data = await readProcessResponse(response, "No se pudo procesar la liga.");
 
+      if (controller.signal.aborted) return;
       if (data.document) setDocument(data.document);
       else setStatusMessage(data.error ?? "No se pudo procesar la liga.");
     } catch {
-      setStatusMessage("No se pudo conectar con el procesador de ligas.");
+      setStatusMessage(controller.signal.aborted ? "Importación cancelada." : "No se pudo conectar con el procesador de sitios web.");
     } finally {
+      if (processingAbortRef.current === controller) processingAbortRef.current = null;
       setIsProcessing(false);
     }
   }
@@ -705,19 +783,17 @@ export function ReaderApp() {
       const hasDuration = Number.isFinite(audio.duration) && audio.duration > 0;
       if (hasDuration) {
         if (piperWordTimelineRef.current.length === 0) {
-          piperWordTimelineRef.current = buildPiperWordTimeline(
-            textToSpeak ?? "",
+          piperWordTimelineRef.current = buildPiperTimeline(
+            tokenizeWords(textToSpeak ?? "").slice(0, endWord - startWord),
             startWord,
-            endWord,
             audio.duration,
           );
         }
 
-        const nextWord = getPiperWordForTime(
+        const nextWord = piperWordAtTime(
           piperWordTimelineRef.current,
-          audio.currentTime + getPiperHighlightLead(audio.playbackRate),
+          audio.currentTime,
           startWord,
-          endWord,
         );
         if (nextWord > progressWordRef.current) {
           updateProgress(nextWord);
@@ -738,6 +814,7 @@ export function ReaderApp() {
   ) {
     if (!document) return;
 
+    playbackRateRef.current = rate;
     const activeSession = sessionId ?? playbackSessionRef.current + 1;
     playbackSessionRef.current = activeSession;
     shouldContinuePlaybackRef.current = true;
@@ -829,8 +906,8 @@ export function ReaderApp() {
       updateProgress(Math.max(progressWordRef.current, nextWord));
     };
     utterance.onend = () => {
-      clearProgressTimer();
       if (playbackSessionRef.current !== params.activeSession) return;
+      clearProgressTimer();
 
       updateProgress(Math.max(progressWordRef.current, params.chunkEndWord));
 
@@ -888,6 +965,10 @@ export function ReaderApp() {
       detail: "La voz local se inicia en este navegador antes de comenzar la lectura.",
     });
 
+    let acceptingStatus = true;
+    const controller = new AbortController();
+    voiceAbortRef.current?.abort();
+    voiceAbortRef.current = controller;
     try {
       console.info("[Piper TTS] Inicio de lectura", {
         documentId: document?.id,
@@ -897,9 +978,13 @@ export function ReaderApp() {
       });
 
       const result = await synthesizePiperSpeech({
+        signal: controller.signal,
         text: params.textToSpeak,
-        onStatus: updateVoiceStartupStatus,
+        onStatus: (update) => {
+          if (acceptingStatus && playbackSessionRef.current === params.activeSession) updateVoiceStartupStatus(update);
+        },
       });
+      acceptingStatus = false;
 
       if (playbackSessionRef.current !== params.activeSession) return;
 
@@ -917,7 +1002,11 @@ export function ReaderApp() {
       });
       await startPiperAudioPlayback(params, result.audio);
     } catch (error) {
+      acceptingStatus = false;
+      if (controller.signal.aborted) return;
       await fallbackToBrowserVoice(params, error);
+    } finally {
+      if (voiceAbortRef.current === controller) voiceAbortRef.current = null;
     }
   }
 
@@ -933,9 +1022,23 @@ export function ReaderApp() {
     audioBlob: Blob,
   ) {
     stopPiperAudio();
+    // Decode locally to exclude silent regions from the estimated word clock.
+    let timeline: PiperWordTiming[] = [];
+    try {
+      const decoder = new OfflineAudioContext(1, 1, 22050);
+      const buffer = await decoder.decodeAudioData(await audioBlob.arrayBuffer());
+      timeline = buildPiperTimeline(
+        tokenizeWords(params.textToSpeak).slice(0, params.chunkEndWord - params.speechBaseWord),
+        params.speechBaseWord, buffer.duration, buffer.getChannelData(0), buffer.sampleRate,
+      );
+    } catch (error) {
+      console.warn("[Piper TTS] Acoustic timing unavailable; using duration estimate", error);
+    }
+    if (playbackSessionRef.current !== params.activeSession) return;
+    piperWordTimelineRef.current = timeline;
     const audioUrl = URL.createObjectURL(audioBlob);
     const audio = new Audio(audioUrl);
-    audio.playbackRate = params.rate;
+    audio.playbackRate = playbackRateRef.current;
     piperAudioUrlRef.current = audioUrl;
     piperAudioRef.current = audio;
     utteranceRef.current = null;
@@ -943,7 +1046,8 @@ export function ReaderApp() {
     activeSegmentRef.current = {
       startWord: params.speechBaseWord,
       endWord: params.chunkEndWord,
-      rate: params.rate,
+      rate: playbackRateRef.current,
+      textToSpeak: params.textToSpeak,
     };
 
     const cleanup = () => {
@@ -956,6 +1060,7 @@ export function ReaderApp() {
     };
 
     audio.onended = () => {
+      if (playbackSessionRef.current !== params.activeSession || piperAudioRef.current !== audio) return;
       cleanup();
       clearProgressTimer();
       clearPiperProgressTracker();
@@ -967,7 +1072,7 @@ export function ReaderApp() {
         void startSpeech(
           params.chunkEndWord,
           params.activeSession,
-          params.rate,
+          playbackRateRef.current,
           params.voiceModel,
         );
         return;
@@ -978,6 +1083,7 @@ export function ReaderApp() {
     };
 
     audio.onerror = () => {
+      if (playbackSessionRef.current !== params.activeSession || piperAudioRef.current !== audio) return;
       cleanup();
       clearProgressTimer();
       clearPiperProgressTracker();
@@ -990,6 +1096,10 @@ export function ReaderApp() {
 
     updateProgress(params.speechBaseWord);
     await audio.play();
+    if (playbackSessionRef.current !== params.activeSession || piperAudioRef.current !== audio) {
+      audio.pause();
+      return;
+    }
     startPiperProgressTracker(
       audio,
       params.speechBaseWord,
@@ -1034,6 +1144,7 @@ export function ReaderApp() {
     const preferredSystemVoice = getPreferredSystemVoice(availableVoices);
     startBrowserSpeech({
       ...params,
+      rate: playbackRateRef.current,
       voiceModel: STANDARD_VOICE_MODEL_ID,
       preferredSystemVoice,
       statusMessage: "La Voz actualizada no pudo iniciar. Se usó Voz estándar.",
@@ -1072,12 +1183,15 @@ export function ReaderApp() {
         stopPiperAudio();
       } else {
         shouldContinuePlaybackRef.current = true;
-        void piperAudioRef.current
+        const audio = piperAudioRef.current;
+        const session = playbackSessionRef.current;
+        void audio
           .play()
           .then(() => {
+            if (playbackSessionRef.current !== session || piperAudioRef.current !== audio) return;
             const activeSegment = activeSegmentRef.current;
             startPiperProgressTracker(
-              piperAudioRef.current as HTMLAudioElement,
+              audio,
               activeSegment?.startWord ?? currentWord,
               Math.min(activeSegment?.endWord ?? document.wordCount, document.wordCount),
               playbackSessionRef.current,
@@ -1087,6 +1201,7 @@ export function ReaderApp() {
             setStatusMessage("Lectura reanudada con Voz actualizada.");
           })
           .catch((error: unknown) => {
+            if (playbackSessionRef.current !== session || piperAudioRef.current !== audio) return;
             setIsPlaying(false);
             setStatusMessage(
               error instanceof Error
@@ -1241,6 +1356,7 @@ export function ReaderApp() {
   }
 
   function changeRate(rate: PlaybackRate) {
+    playbackRateRef.current = rate;
     updatePreferences({ rate });
     setStatusMessage(`Velocidad actualizada a ${rate === 1 ? "Normal" : rate}.`);
     if (piperAudioRef.current && !piperAudioRef.current.ended) {
@@ -1295,16 +1411,14 @@ export function ReaderApp() {
     selectedVoiceModelRef.current = modelId;
     const wasPlaying =
       isPlaying ||
-      Boolean(piperAudioRef.current && !piperAudioRef.current.ended) ||
-      Boolean(utteranceRef.current && window.speechSynthesis.speaking);
-    const restartWord = currentWord;
+      Boolean(piperAudioRef.current && !piperAudioRef.current.paused && !piperAudioRef.current.ended) ||
+      Boolean(utteranceRef.current && window.speechSynthesis.speaking && !window.speechSynthesis.paused);
+    const restartWord = progressWordRef.current;
 
     stopPlayback();
     setIsPlaying(false);
     if (wasPlaying) {
-      window.setTimeout(() => {
-        void startSpeech(restartWord, undefined, preferences.rate, modelId);
-      }, 0);
+      void startSpeech(restartWord, undefined, preferences.rate, modelId);
     }
 
     updatePreferences({ voiceId: modelId });
@@ -1347,28 +1461,31 @@ export function ReaderApp() {
   }
 
   async function reconstructLegibleText() {
-    if (!document) return;
+    if (!document || processingAbortRef.current) return;
+    const controller = new AbortController();
+    processingAbortRef.current = controller;
     setIsProcessing(true);
-    setStatusMessage("Preparando reconstrucción legible del OCR.");
-    const response = await fetch("/api/text/reconstruct", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ text: document.originalText }),
-    });
-    const data = (await response.json()) as { text: string; message: string };
-    setIsProcessing(false);
-    setDocument(
-      createDocumentFromText({
-        title: document.title,
-        source: document.source,
-        sourceLabel: document.sourceLabel,
-        text: data.text,
-        qualityStatus: "ready",
-        qualityMessage: data.message,
-        ocrAvailable: false,
-      }),
-    );
-    setStatusMessage(data.message);
+    setStatusMessage("Preparando reconstrucción del texto.");
+    try {
+      const response = await fetch("/api/text/reconstruct", {
+        method: "POST", signal: controller.signal,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text: document.originalText }),
+      });
+      const data = await response.json() as { text?: string; message?: string; error?: string };
+      if (!response.ok || !data.text?.trim()) throw new Error(data.error || "El servicio no devolvió texto válido.");
+      if (controller.signal.aborted) return;
+      setDocument(createDocumentFromText({
+        title: document.title, source: document.source, sourceLabel: document.sourceLabel,
+        text: data.text, qualityStatus: "needs-review", qualityMessage: data.message || "Revisa el resultado antes de escuchar.", ocrAvailable: true,
+      }));
+      setStatusMessage(data.message || "Texto recibido. Revisa nombres y cifras.");
+    } catch (error) {
+      setStatusMessage(controller.signal.aborted ? "Reconstrucción cancelada." : error instanceof Error ? error.message : "No se pudo reconstruir el texto. Se conserva el original.");
+    } finally {
+      if (processingAbortRef.current === controller) processingAbortRef.current = null;
+      setIsProcessing(false);
+    }
   }
 
   async function toggleFocusMode() {
@@ -1432,6 +1549,7 @@ export function ReaderApp() {
                   key={rate}
                   type="button"
                   data-rate={rate}
+                  aria-pressed={preferences.rate === rate}
                   className={preferences.rate === rate ? "active" : ""}
                   onClick={handleRateButtonClick}
                 >
@@ -1440,7 +1558,7 @@ export function ReaderApp() {
               ))}
             </div>
 
-            <button className="reset-button" type="button" onClick={resetReading}>
+            <button className="reset-button" type="button" onClick={resetReading} aria-label="Reiniciar" title="Reiniciar">
               <RotateCcw size={18} />
               <span>Reiniciar</span>
             </button>
@@ -1476,7 +1594,19 @@ export function ReaderApp() {
         </button>
 
         {isVoiceMenuOpen ? (
-          <div className="voice-model-menu" role="menu">
+          <div className="voice-model-menu" role="menu" aria-label="Voces" onKeyDown={(event) => {
+            const buttons = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>("button"));
+            const current = buttons.indexOf(globalThis.document.activeElement as HTMLButtonElement);
+            if (["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
+              event.preventDefault();
+              const index = event.key === "Home" ? 0 : event.key === "End" ? buttons.length - 1 : (current + (event.key === "ArrowDown" ? 1 : -1) + buttons.length) % buttons.length;
+              buttons[index]?.focus();
+            }
+            if (event.key === "Escape") {
+              event.stopPropagation(); setIsVoiceMenuOpen(false);
+              event.currentTarget.parentElement?.querySelector<HTMLButtonElement>(".voice-model-button")?.focus();
+            }
+          }}>
             {VOICE_MODELS.map((model) => (
               <button
                 key={model.id}
@@ -1484,7 +1614,10 @@ export function ReaderApp() {
                 role="menuitemradio"
                 aria-checked={selectedVoiceModel === model.id}
                 className={selectedVoiceModel === model.id ? "active" : ""}
-                onClick={() => changeVoiceModel(model.id)}
+                onClick={(event) => {
+                  event.currentTarget.closest(".voice-model-selector")?.querySelector<HTMLButtonElement>(".voice-model-button")?.focus();
+                  changeVoiceModel(model.id);
+                }}
               >
                 <span>{model.label}</span>
                 <small>{model.description}</small>
@@ -1500,14 +1633,14 @@ export function ReaderApp() {
     if (!voiceStartup?.visible) return null;
 
     return (
-      <div className="voice-startup-overlay" role="status" aria-live="polite">
+      <dialog ref={voiceDialogRef} className="voice-startup-overlay" aria-labelledby="voice-startup-title" onCancel={() => { stopPlayback(); setIsPlaying(false); }}>
         <div className="voice-startup-modal" data-voice-status={voiceStartup.status}>
           <div className="voice-startup-icon" aria-hidden="true">
             <SpeakingLipsIcon size={24} />
           </div>
           <div>
             <p className="tool-title">Modelo de voz</p>
-            <h2>{voiceStartup.message}</h2>
+            <h2 id="voice-startup-title" aria-live="polite">{voiceStartup.message}</h2>
           </div>
           {voiceStartup.detail ? <p>{voiceStartup.detail}</p> : null}
           {typeof voiceStartup.progress === "number" ? (
@@ -1518,14 +1651,15 @@ export function ReaderApp() {
               <span style={{ width: `${voiceStartup.progress}%` }} />
             </div>
           ) : null}
+          <button type="button" className="primary-action" onClick={() => { stopPlayback(); setIsPlaying(false); setStatusMessage("Preparación de voz cancelada."); }}>Cancelar</button>
         </div>
-      </div>
+      </dialog>
     );
   }
 
   function renderFocusControls() {
     return (
-      <aside className="focus-control-dock" aria-label="Controles de lectura en pantalla completa">
+      <aside ref={focusDockRef} className="focus-control-dock" aria-label="Controles de lectura en pantalla completa">
         <div className="focus-readout-row">
           <div className="focus-readout" aria-label="Avance de lectura">
             <span>{formatRemainingTime(remainingSeconds)} restantes</span>
@@ -1547,7 +1681,7 @@ export function ReaderApp() {
           </button>
           <button className="focus-play-button" type="button" onClick={togglePlayback}>
             {isPlaying ? <Pause size={18} /> : <Play size={18} />}
-            {isPlaying ? "Pausar" : "Leer"}
+            {isPlaying ? "Pausar" : "Reproducir"}
           </button>
           <button type="button" onClick={() => seek(5)} aria-label="Adelantar 5 segundos">
             5 s
@@ -1565,6 +1699,7 @@ export function ReaderApp() {
               key={rate}
               type="button"
               data-rate={rate}
+              aria-pressed={preferences.rate === rate}
               className={preferences.rate === rate ? "active" : ""}
               onClick={handleRateButtonClick}
             >
@@ -1652,6 +1787,7 @@ export function ReaderApp() {
         <button
           type="button"
           className={preferences.theme === "warm-paper" ? "mode-button active" : "mode-button"}
+          aria-pressed={preferences.theme === "warm-paper"}
           onClick={() => updatePreferences({ theme: "warm-paper" })}
         >
           <SunMedium size={18} />
@@ -1660,6 +1796,7 @@ export function ReaderApp() {
         <button
           type="button"
           className={preferences.theme === "night" ? "mode-button active" : "mode-button"}
+          aria-pressed={preferences.theme === "night"}
           onClick={() => updatePreferences({ theme: "night" })}
         >
           <Moon size={18} />
@@ -1673,12 +1810,16 @@ export function ReaderApp() {
     );
   }
 
+  if (!isHydrated) return <main className="reader-shell"><p role="status">Recuperando tu documento...</p></main>;
+
   return (
     <main
       className={`reader-shell theme-${preferences.theme} mode-${preferences.readingMode} ${
         document ? "has-document" : "empty-state"
       }`}
     >
+      <p className="status-accessible" role="status" aria-live="polite">{statusMessage}</p>
+      {storageWarning ? <p role="alert" className="storage-warning">{storageWarning}</p> : null}
       <header className="reader-topbar">
         <div className="file-identity">
           <span className="file-icon">
@@ -1706,6 +1847,7 @@ export function ReaderApp() {
           </button>
           <button
             className={activePanel === "file" ? "home-action active" : "home-action"}
+            aria-pressed={activePanel === "file"}
             type="button"
             onClick={() => setActivePanel("file")}
           >
@@ -1714,6 +1856,7 @@ export function ReaderApp() {
           </button>
           <button
             className={activePanel === "text" ? "home-action active" : "home-action"}
+            aria-pressed={activePanel === "text"}
             type="button"
             onClick={() => setActivePanel("text")}
           >
@@ -1722,6 +1865,7 @@ export function ReaderApp() {
           </button>
           <button
             className={activePanel === "web" ? "home-action active" : "home-action"}
+            aria-pressed={activePanel === "web"}
             type="button"
             onClick={() => setActivePanel("web")}
           >
@@ -1738,7 +1882,8 @@ export function ReaderApp() {
                 <label className="upload-drop">
                   <input
                     type="file"
-                    accept=".pdf,.doc,.docx,.txt,.md,application/pdf,application/x-pdf,application/acrobat,applications/vnd.pdf,application/octet-stream,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain"
+                    disabled={isProcessing}
+                    accept=".pdf,.docx,.txt,.md,application/pdf,application/octet-stream,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain"
                     onChange={handleFileChange}
                   />
                   <FileText size={24} />
@@ -1750,12 +1895,14 @@ export function ReaderApp() {
             {activePanel === "text" ? (
               <div className="input-cluster">
                 <textarea
+                  aria-label="Texto para escuchar"
+                  disabled={isProcessing}
                   value={pastedText}
                   onChange={(event) => setPastedText(event.target.value)}
                   placeholder="Pega aquí el texto que quieres escuchar."
                 />
-                <button className="primary-action" type="button" onClick={processText}>
-                  Preparar lectura
+                <button className="primary-action" type="button" onClick={processText} disabled={isProcessing || !pastedText.trim()}>
+                  Preparar texto
                 </button>
               </div>
             ) : null}
@@ -1763,15 +1910,19 @@ export function ReaderApp() {
             {activePanel === "web" ? (
               <div className="inline-form">
                 <input
+                  type="url"
+                  aria-label="Dirección del sitio web"
+                  disabled={isProcessing}
                   value={url}
                   onChange={(event) => setUrl(event.target.value)}
                   placeholder="https://sitio.com/articulo"
                 />
-                <button type="button" onClick={processUrl}>
+                <button type="button" onClick={processUrl} disabled={isProcessing || !url.trim()}>
                   Leer sitio
                 </button>
               </div>
             ) : null}
+            {isProcessing ? <div className="import-progress"><p>{statusMessage}</p><button type="button" onClick={() => processingAbortRef.current?.abort()}>Cancelar</button></div> : null}
           </div>
 
           {document ? (
@@ -1785,7 +1936,7 @@ export function ReaderApp() {
             </>
           ) : null}
 
-          <div className="reader-stage" aria-live="polite">
+          <div className="reader-stage">
             {document ? (
               <article className="reader-document">
                 <div className="reading-metrics">
@@ -1794,6 +1945,14 @@ export function ReaderApp() {
                 </div>
                 <div
                   className="document-text"
+                  role="region"
+                  aria-label="Contenido del documento"
+                  tabIndex={0}
+                  onKeyDown={(event) => {
+                    if (preferences.readingMode === "focus" && (event.key === "Enter" || event.key === " ")) {
+                      event.preventDefault(); toggleFocusControlsFromReading();
+                    }
+                  }}
                   onClick={toggleFocusControlsFromReading}
                   title={
                     preferences.readingMode === "focus"
@@ -1811,40 +1970,14 @@ export function ReaderApp() {
             ) : (
               <div className="empty-reader">
                 <Headphones size={44} />
-                <h2>Escucha, lee y retoma tus documentos con precisión.</h2>
-                <p>
-                  Sube un archivo, pega texto o pega una liga de sitio web. La lectura se
-                  limpiará antes de llegar a la voz.
-                </p>
+                <h2>Sin documento</h2>
               </div>
             )}
           </div>
         </section>
 
         <aside className="library-panel">
-          <div className="tool-group mode-controls desktop-mode-controls">
-            <p className="tool-title">Modos</p>
-            <button
-              type="button"
-              className={preferences.theme === "warm-paper" ? "mode-button active" : "mode-button"}
-              onClick={() => updatePreferences({ theme: "warm-paper" })}
-            >
-              <SunMedium size={18} />
-              Papel cálido
-            </button>
-            <button
-              type="button"
-              className={preferences.theme === "night" ? "mode-button active" : "mode-button"}
-              onClick={() => updatePreferences({ theme: "night" })}
-            >
-              <Moon size={18} />
-              Lectura nocturna
-            </button>
-            <button type="button" className="mode-button" onClick={toggleFocusMode}>
-              <ScanText size={18} />
-              Pantalla completa
-            </button>
-          </div>
+          {renderModeControls("desktop-mode-controls")}
 
           {shouldShowTextReview ? (
             <div className="ocr-card">
@@ -1862,7 +1995,7 @@ export function ReaderApp() {
                   <button type="button" onClick={reconstructLegibleText}>
                     Reconstruir con IA ligera
                   </button>
-                  <small>IA local ligera disponible para texto difícil.</small>
+                  <small>El texto se enviará al servicio de IA configurado.</small>
                 </>
               ) : (
                 <small>La reconstrucción con IA ligera es opcional y no está configurada.</small>
@@ -1872,14 +2005,14 @@ export function ReaderApp() {
 
           <div className="status-rail">
             <span className={isProcessing ? "status-dot busy" : "status-dot"} />
-            <p>{isProcessing ? "Procesando contenido." : statusMessage}</p>
+            <p>{statusMessage}</p>
           </div>
         </aside>
       </section>
 
-      <footer className="player-dock desktop-player">
+      {document ? <footer className="player-dock desktop-player">
         {renderPlayerControls()}
-      </footer>
+      </footer> : null}
 
       {renderVoiceStartupOverlay()}
 
@@ -1994,81 +2127,6 @@ function getRenderedLineTargets(readingPane: Element) {
       };
     })
     .sort((a, b) => a.startWord - b.startWord);
-}
-
-function buildPiperWordTimeline(
-  text: string,
-  startWord: number,
-  endWord: number,
-  durationSeconds: number,
-): PiperWordTiming[] {
-  const wordCount = Math.max(0, endWord - startWord);
-  if (wordCount === 0 || !Number.isFinite(durationSeconds) || durationSeconds <= 0) return [];
-
-  const localTokens = tokenizeWords(text);
-  const timingCount = Math.min(wordCount, localTokens.length || wordCount);
-  const weights = Array.from({ length: timingCount }, (_, index) => {
-    const token = localTokens[index];
-    if (!token) return 1;
-
-    const nextStart = localTokens[index + 1]?.start ?? text.length;
-    const separator = text.slice(token.end, nextStart);
-    const wordLength = Math.max(1, token.text.length);
-    let weight = Math.max(0.82, Math.min(3.8, Math.sqrt(wordLength) * 0.96));
-
-    if (/[.!?]/.test(separator)) weight += 1.25;
-    if (/[;:]/.test(separator)) weight += 0.85;
-    if (/,/.test(separator)) weight += 0.5;
-    if (/\n{2,}/.test(separator)) weight += 1.05;
-    if (/\n/.test(separator)) weight += 0.35;
-
-    return weight;
-  });
-
-  const totalWeight = weights.reduce((sum, weight) => sum + weight, 0) || timingCount;
-  const usableDuration = Math.max(0.1, durationSeconds);
-  let elapsed = 0;
-
-  return weights.map((weight, index) => {
-    const timing = {
-      startsAt: Math.min(usableDuration, elapsed),
-      wordIndex: startWord + index,
-    };
-    elapsed += (weight / totalWeight) * usableDuration;
-    return timing;
-  });
-}
-
-function getPiperWordForTime(
-  timeline: PiperWordTiming[],
-  mediaTime: number,
-  startWord: number,
-  endWord: number,
-) {
-  if (timeline.length === 0) return startWord;
-
-  let low = 0;
-  let high = timeline.length - 1;
-  let match = 0;
-
-  while (low <= high) {
-    const middle = Math.floor((low + high) / 2);
-    if (timeline[middle].startsAt <= mediaTime) {
-      match = middle;
-      low = middle + 1;
-    } else {
-      high = middle - 1;
-    }
-  }
-
-  return Math.max(startWord, Math.min(endWord, timeline[match].wordIndex));
-}
-
-function getPiperHighlightLead(playbackRate: number) {
-  if (playbackRate >= 1) return 0.2;
-  if (playbackRate >= 0.85) return 0.16;
-  if (playbackRate >= 0.75) return 0.13;
-  return 0.1;
 }
 
 function createVisibleTextParts(params: {

@@ -3,7 +3,8 @@ import type { PlaybackRate, ReaderDocument, TextBlock, TextBlockKind, TextChunk,
 const GRAPHIC_SYMBOLS =
   /[\p{Extended_Pictographic}\u2190-\u21ff\u2600-\u27bf\u2900-\u297f\u2b00-\u2bff]/gu;
 const DECORATIVE_SYMBOLS = /[•·▪▫■□◆◇○●◦]/g;
-const INLINE_MARKERS = /[*_`~^=|\\/#<>]/g;
+const INLINE_MARKERS = /[*_`~^|\\/#<>]/g;
+const EMOJI_COMPONENTS = /[\p{Emoji_Modifier}\p{Regional_Indicator}\u200d\ufe0e\ufe0f\u{e0020}-\u{e007f}]/gu;
 const LINE_SPACES = /[ \t\f\v]+/g;
 const WORD_PATTERN = /[\p{L}\p{M}\p{N}]+(?:['’´-][\p{L}\p{M}\p{N}]+)*/gu;
 
@@ -234,6 +235,8 @@ export function incoherenceScore(text: string) {
 
 function buildRawBlocks(input: string) {
   const normalizedInput = removeCitationReferences(input)
+    .replace(/[0-9#*]\ufe0f?\u20e3/gu, " ")
+    .replace(EMOJI_COMPONENTS, "")
     .normalize("NFKC")
     .replace(/\r\n?/g, "\n")
     .replace(/\u00a0/g, " ")
@@ -286,7 +289,7 @@ function parseLine(rawLine: string): ParsedLine {
   working = working.replace(/^\s{0,3}>{1,2}\s*/u, "");
 
   const bullet = working.match(
-    /^\s*((?:[-*•·▪▫■□◆◇○●◦])|(?:(?:\d+(?:\.\d+)*|[a-zA-Z])[\.)]))\s+(.+)$/u,
+    /^\s*((?:[-*•·▪▫■□◆◇○●◦])|(?:\+(?=\s+\p{L}[\p{L}\p{M}]+\s+\p{L})(?!.*[+=]))|(?:(?:\d+(?:\.\d+)*|[a-zA-Z])[\.)]))\s+(.+)$/u,
   );
   const isBullet = Boolean(bullet);
   const isNumberedMarker = Boolean(bullet?.[1] && /^\d/.test(bullet[1]));
@@ -303,10 +306,15 @@ function parseLine(rawLine: string): ParsedLine {
 }
 
 function cleanLineText(line: string) {
+  if (/^\s*(?:={3,}|-{3,}|(?:\*\s*){3,}|(?:_\s*){3,})\s*$/.test(line)) return "";
   return line
+    .replace(/\+/g, " más ")
+    .replace(/=/g, " igual a ")
     .replace(DECORATIVE_SYMBOLS, " ")
     .replace(INLINE_MARKERS, " ")
-    .replace(/[{}\[\]()+]/g, " ")
+    .replace(/[{}\[\]]/g, " ")
+    .replace(/\(\s+/g, "(")
+    .replace(/\s+\)/g, ")")
     .replace(/\s+([,.;:!?¿¡])/g, "$1")
     .replace(/([¿¡])\s+/g, "$1")
     .replace(LINE_SPACES, " ")
@@ -322,7 +330,7 @@ function classifyLine(
     return line.explicitHeadingLevel <= 2 ? "heading" : "subheading";
   }
 
-  if (line.isNumberedMarker && looksLikeHeading(line.text, previousBlank, nextBlank)) {
+  if (line.isNumberedMarker && looksLikeHeading(line.text, previousBlank, nextBlank, true)) {
     return "subheading";
   }
 
@@ -343,13 +351,21 @@ function looksLikeNumberedHeading(text: string) {
   return /^\d+(?:\.\d+)*\.?\s+[\p{Lu}\p{N}]/u.test(text) && countWords(text) <= 18;
 }
 
-function looksLikeHeading(text: string, previousBlank: boolean, nextBlank: boolean) {
+function looksLikeHeading(
+  text: string,
+  previousBlank: boolean,
+  nextBlank: boolean,
+  hasNumberedMarker = false,
+) {
   const words = countWords(text);
   if (words === 0 || words > 18) return false;
   if (looksLikeNumberedHeading(text)) return true;
 
-  const endsAsSentence = /[.!?]$/.test(text);
+  const endsAsSentence = /[.!?,;][)"'»”’]*$/u.test(text);
   if (endsAsSentence) return false;
+
+  // Blank lines from PDF extraction are not evidence that a prose continuation is a title.
+  if (!hasNumberedMarker && /^[^\p{L}\p{N}]*\p{Ll}/u.test(text)) return false;
 
   const uppercaseRatio = getUppercaseRatio(text);
   if (words <= 12 && uppercaseRatio >= 0.68) return true;
@@ -439,10 +455,10 @@ function splitLongBlock(text: string, targetWords: number) {
 
 function removeCitationReferences(input: string) {
   return input
-    .replace(/\s*\(([^()]{1,260})\)/g, (match, inner: string) =>
+    .replace(/\(([^()]{1,260})\)/g, (match, inner: string) =>
       isCitationText(inner) ? " " : match,
     )
-    .replace(/\s*\[([^\[\]]{1,180})\]/g, (match, inner: string) =>
+    .replace(/\[([^\[\]]{1,180})\]/g, (match, inner: string) =>
       isBracketCitation(inner) ? " " : match,
     );
 }
@@ -457,18 +473,22 @@ function isCitationText(value: string) {
   const text = value.replace(/\s+/g, " ").trim();
   if (!text) return false;
 
-  const hasYear = /\b(?:18|19|20)\d{2}[a-z]?\b/i.test(text);
-  const yearOnly = /^(?:ca\.?\s*)?(?:18|19|20)\d{2}[a-z]?(?:\s*[:,-]\s*\d{1,4})?$/.test(text);
-  const hasCitationCue =
-    /[,;]|&|\bet\s+al\.?\b|\bpp?\.?\b|\bpá?gs?\.?\b|\bdoi\b|\bisbn\b|\bissn\b|\brecuperado\b|\bconsultado\b/i.test(
-      text,
-    );
-  const hasAuthorConnector = /\b(y|and)\b/i.test(text);
-  const isCompactReference = text.split(/\s+/).length <= 16;
-
-  if (yearOnly) return true;
   if (/^(?:ibid\.?|idem|op\.?\s*cit\.?)$/i.test(text)) return true;
-  if (/\b(?:doi|isbn|issn)\b/i.test(text)) return true;
 
-  return hasYear && (hasCitationCue || hasAuthorConnector || isCompactReference);
+  // Require the entire parenthesis to match references, not merely contain a year.
+  // Bare dates and ambiguous prose are retained to avoid losing semantic content.
+  return text.split(/\s*;\s*/).every(isAuthorDateReference);
+}
+
+const AUTHOR_WORD = String.raw`\p{Lu}[\p{L}\p{M}'’.-]*`;
+const AUTHOR_NAME = String.raw`(?:(?:de|del|la|las|los|van|von)\s+)*${AUTHOR_WORD}(?:\s+(?:(?:de|del|la|las|los|van|von|of|the|y|and)\s+)*${AUTHOR_WORD})*`;
+const AUTHORS = String.raw`${AUTHOR_NAME}(?:(?:,\s*|\s+(?:y|and|&)\s+)${AUTHOR_NAME})*(?:\s+et\s+al\.?)?`;
+const REFERENCE_DATE = String.raw`(?:(?:18|19|20)\d{2}[a-z]?|s\.\s*f\.)`;
+const AUTHOR_DATE_REFERENCE = new RegExp(
+  String.raw`^${AUTHORS},\s*${REFERENCE_DATE}(?:\s*,\s*${REFERENCE_DATE})*(?:\s*,\s*(?:pp?\.|págs?\.)\s*\d+(?:\s*[-–]\s*\d+)?)?$`,
+  "u",
+);
+
+function isAuthorDateReference(text: string) {
+  return AUTHOR_DATE_REFERENCE.test(text);
 }

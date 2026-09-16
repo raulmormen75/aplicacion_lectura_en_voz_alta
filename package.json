@@ -6,10 +6,13 @@
     "node": ">=22.13.0"
   },
   "scripts": {
+    "predev": "node scripts/prepare-reader-assets.mjs",
     "dev": "next dev",
+    "prebuild": "node scripts/prepare-reader-assets.mjs",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test": "node --experimental-strip-types --test --test-isolation=none tests/*.test.mjs"
   },
   "dependencies": {
     "@mozilla/readability": "^0.6.0",

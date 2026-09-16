@@ -1,4 +1,5 @@
 import type { Progress, TtsSession, VoiceId } from "@realtimex/piper-tts-web";
+import { createPiperEngine } from "./piper-engine";
 
 export type PiperStage =
   | "idle"
@@ -31,64 +32,34 @@ const PIPER_TIMEOUT_MS = 90_000;
 
 let sessionPromise: Promise<TtsSession> | null = null;
 
+const synthesize = createPiperEngine<PiperStatusUpdate>(async (report) => {
+  await configureOnnxRuntimeForBrowser();
+  const tts = await import("@realtimex/piper-tts-web");
+  report({ stage: "initializing", message: "Preparando voz", detail: "Cargando los archivos necesarios." });
+  return getPiperSession(tts, report);
+}, {
+  preparing: { stage: "preparing", message: "Preparando voz", detail: "Preparando la voz en este dispositivo." },
+  generating: { stage: "generating", message: "Generando audio", detail: "Preparando el audio en este dispositivo." },
+});
+
 export async function synthesizePiperSpeech({
   text,
   onStatus,
   timeoutMs = PIPER_TIMEOUT_MS,
+  signal,
 }: {
   text: string;
   onStatus?: (update: PiperStatusUpdate) => void;
   timeoutMs?: number;
+  signal?: AbortSignal;
 }): Promise<PiperSynthesisResult> {
   const speechText = text.trim();
   if (!speechText) throw new Error("No hay texto suficiente para preparar la voz.");
   if (typeof window === "undefined") {
-    throw new Error("Piper solo puede inicializarse en el navegador.");
+    throw new Error("La voz solo puede prepararse en el navegador.");
   }
 
-  return withTimeout(
-    runPiperSynthesis(speechText, onStatus),
-    timeoutMs,
-    "Piper tardo demasiado en preparar la voz.",
-  );
-}
-
-async function runPiperSynthesis(
-  text: string,
-  onStatus?: (update: PiperStatusUpdate) => void,
-): Promise<PiperSynthesisResult> {
-  const initStart = performance.now();
-  onStatus?.({
-    stage: "preparing",
-    message: "Preparando voz",
-    detail: "Cargando el motor local en el navegador.",
-  });
-
-  await configureOnnxRuntimeForBrowser();
-  const tts = await import("@realtimex/piper-tts-web");
-  onStatus?.({
-    stage: "initializing",
-    message: "Inicializando motor",
-    detail: "Conectando Piper con ONNX Runtime.",
-  });
-
-  const session = await getPiperSession(tts, onStatus);
-  const initMs = performance.now() - initStart;
-
-  onStatus?.({
-    stage: "generating",
-    message: "Generando audio",
-    detail: "Procesando la muestra en este dispositivo.",
-  });
-  const generationStart = performance.now();
-  const audio = await session.predict(text);
-  const generationMs = performance.now() - generationStart;
-
-  return {
-    audio,
-    initMs,
-    generationMs,
-  };
+  return synthesize({ text: speechText, onStatus, timeoutMs, signal });
 }
 
 async function getPiperSession(
@@ -102,10 +73,9 @@ async function getPiperSession(
       fallbackStrategy: "cdn",
       progress: (progress) => reportPiperProgress(progress, onStatus),
       logger: (message) => reportPiperLog(message, onStatus),
-    }).catch((error) => {
-      sessionPromise = null;
-      throw error;
     });
+    // Failed initialization remains in the library singleton too. Recreating
+    // it cannot recover that native session; a page reload is required.
   }
 
   return sessionPromise;
@@ -124,21 +94,19 @@ function reportPiperProgress(
     progress.total > 0 ? Math.min(100, Math.round((progress.loaded / progress.total) * 100)) : 0;
   onStatus?.({
     stage: "downloading",
-    message: "Descargando modelo",
+    message: "Descargando voz",
     progress: percent,
     detail: `${formatBytes(progress.loaded)} de ${formatBytes(progress.total)}`,
   });
 }
 
 function reportPiperLog(message: string, onStatus?: (update: PiperStatusUpdate) => void) {
-  console.info("[Piper TTS]", message);
-
   const normalized = message.toLowerCase();
   if (normalized.includes("loading model for voice")) {
     onStatus?.({
       stage: "downloading",
-      message: "Descargando modelo",
-      detail: "Descargando o leyendo la voz es_MX Claude.",
+      message: "Preparando voz",
+      detail: "Buscando los archivos de la voz.",
     });
     return;
   }
@@ -146,8 +114,8 @@ function reportPiperLog(message: string, onStatus?: (update: PiperStatusUpdate) 
   if (normalized.includes("loading model config")) {
     onStatus?.({
       stage: "downloading",
-      message: "Descargando modelo",
-      detail: "Leyendo la configuracion de la voz.",
+      message: "Preparando voz",
+      detail: "Cargando los ajustes de la voz.",
     });
     return;
   }
@@ -155,22 +123,10 @@ function reportPiperLog(message: string, onStatus?: (update: PiperStatusUpdate) 
   if (normalized.includes("wasm") || normalized.includes("onnx")) {
     onStatus?.({
       stage: "initializing",
-      message: "Inicializando motor",
-      detail: "Preparando los archivos WASM de Piper.",
+      message: "Preparando voz",
+      detail: "Cargando los archivos necesarios.",
     });
   }
-}
-
-function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string) {
-  let timeoutId: number | undefined;
-
-  const timeout = new Promise<never>((_, reject) => {
-    timeoutId = window.setTimeout(() => reject(new Error(message)), timeoutMs);
-  });
-
-  return Promise.race([promise, timeout]).finally(() => {
-    if (timeoutId) window.clearTimeout(timeoutId);
-  });
 }
 
 function formatBytes(bytes: number) {

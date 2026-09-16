@@ -4,10 +4,23 @@ import { pathToFileURL } from "node:url";
 import type { DocumentInitParameters } from "pdfjs-dist/types/src/display/api";
 import { z } from "zod";
 import { cleanTextForSpeech, createDocumentFromText, incoherenceScore } from "@/lib/reader/text";
+import { MAX_REQUEST_BYTES, MAX_TEXT_CHARS, readBoundedBody, readBoundedJson, readRemote, SafeHttpError } from "@/lib/server/http-safety";
 
 export const runtime = "nodejs";
 
-const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
+const MAX_UPLOAD_BYTES = MAX_REQUEST_BYTES - 64_000;
+
+function documentResponse(value: unknown) {
+  const json = JSON.stringify(value);
+  if (Buffer.byteLength(json) > MAX_REQUEST_BYTES) {
+    throw new DocumentProcessError("El resultado es demasiado grande. Divide el documento en partes.", 413);
+  }
+  return new NextResponse(json, { headers: { "content-type": "application/json", "cache-control": "no-store" } });
+}
+
+function checkTextSize(text: string) {
+  if (text.length > MAX_TEXT_CHARS) throw new DocumentProcessError("El texto es demasiado largo. Divide el documento en partes.", 413);
+}
 
 class DocumentProcessError extends Error {
   constructor(
@@ -21,8 +34,8 @@ class DocumentProcessError extends Error {
 const textPayloadSchema = z.object({
   source: z.enum(["pastedText", "website", "googleDoc"]),
   title: z.string().min(1).max(180).optional(),
-  text: z.string().optional(),
-  url: z.string().url().optional(),
+  text: z.string().max(MAX_TEXT_CHARS).optional(),
+  url: z.string().max(4096).url().optional(),
 });
 
 export async function POST(request: NextRequest) {
@@ -30,7 +43,13 @@ export async function POST(request: NextRequest) {
 
   try {
     if (contentType.includes("multipart/form-data")) {
-      const formData = await request.formData();
+      const bytes = await readBoundedBody(request);
+      let formData: FormData;
+      try {
+        formData = await new Response(bytes, { headers: { "content-type": contentType } }).formData();
+      } catch {
+        throw new DocumentProcessError("El formulario no tiene un formato válido.", 400);
+      }
       const file = formData.get("file");
       if (!(file instanceof File)) {
         throw new DocumentProcessError("No se recibió un archivo válido.", 400);
@@ -45,12 +64,13 @@ export async function POST(request: NextRequest) {
 
       if (file.size > MAX_UPLOAD_BYTES) {
         throw new DocumentProcessError(
-          "El archivo es demasiado grande para procesarlo en línea. Prueba con un PDF menor a 25 MB.",
+          "El archivo es demasiado grande para esta API. Usa un archivo menor a 3.9 MB.",
           413,
         );
       }
 
       const extracted = await extractFileText(file);
+      checkTextSize(extracted.text);
       const cleanText = cleanTextForSpeech(extracted.text);
       const qualityScore = incoherenceScore(cleanText);
       const status = extracted.needsOcr || qualityScore > 0.22 ? "needs-ocr" : "ready";
@@ -66,7 +86,7 @@ export async function POST(request: NextRequest) {
             : "Archivo procesado y listo para escuchar.",
       });
 
-      return NextResponse.json({
+      return documentResponse({
         document: {
           ...document,
           quality: {
@@ -81,7 +101,7 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    const payload = textPayloadSchema.parse(await request.json());
+    const payload = textPayloadSchema.parse(await readBoundedJson(request));
 
     if (payload.source === "website") {
       if (!payload.url) {
@@ -89,7 +109,7 @@ export async function POST(request: NextRequest) {
       }
 
       const article = await extractWebsiteText(payload.url);
-      return NextResponse.json({
+      return documentResponse({
         document: createDocumentFromText({
           title: article.title || new URL(payload.url).hostname,
         source: "website",
@@ -107,7 +127,7 @@ export async function POST(request: NextRequest) {
       }
 
       const exported = await extractGoogleDocText(payload.url);
-      return NextResponse.json({
+      return documentResponse({
         document: createDocumentFromText({
           title: exported.title,
           source: "googleDoc",
@@ -123,7 +143,7 @@ export async function POST(request: NextRequest) {
       throw new DocumentProcessError("Pega texto antes de iniciar la lectura.", 400);
     }
 
-    return NextResponse.json({
+    return documentResponse({
       document: createDocumentFromText({
         title: payload.title || "Texto pegado",
         source: "pastedText",
@@ -135,16 +155,15 @@ export async function POST(request: NextRequest) {
       }),
     });
   } catch (error) {
-    if (error instanceof DocumentProcessError) {
+    if (error instanceof DocumentProcessError || error instanceof SafeHttpError) {
       return NextResponse.json({ error: error.message }, { status: error.status });
     }
 
     if (error instanceof z.ZodError) {
-      return NextResponse.json({ error: "La solicitud no tiene un formato válido." }, { status: 400 });
+      return NextResponse.json({ error: "La solicitud no tiene un formato válido o supera el límite permitido." }, { status: error.issues.some((issue) => issue.code === "too_big") ? 413 : 400 });
     }
 
-    const message = error instanceof Error ? error.message : "No se pudo procesar el contenido.";
-    return NextResponse.json({ error: message }, { status: 500 });
+    return NextResponse.json({ error: "No se pudo procesar el contenido. Revisa el formato e intenta nuevamente." }, { status: 500 });
   }
 }
 
@@ -175,6 +194,9 @@ async function extractFileText(file: File) {
     mime.includes("msword") ||
     fileName.endsWith(".docx")
   ) {
+    if (buffer.subarray(0, 2).toString("ascii") !== "PK") {
+      throw new DocumentProcessError("Convierte el archivo Word al formato DOCX antes de importarlo.", 415);
+    }
     const mammoth = await import("mammoth");
     const result = await mammoth.convertToHtml({ buffer });
     return {
@@ -211,17 +233,24 @@ async function extractPdfText(arrayBuffer: ArrayBuffer) {
   };
 
   const loadingTask = pdfjs.getDocument(documentInit);
-  const pdf = await loadingTask.promise;
   const pages: string[] = [];
 
-  for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
-    const page = await pdf.getPage(pageNumber);
-    const content = await page.getTextContent();
-    const pageText = extractPdfPageText(content.items).trim();
-    if (pageText) pages.push(pageText);
-  }
-
-  return pages.join("\n\n");
+  try {
+    const pdf = await loadingTask.promise;
+    if (pdf.numPages > 200) throw new DocumentProcessError("El PDF supera el límite de 200 páginas de esta API.", 413);
+    let textLength = 0;
+    for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+      const page = await pdf.getPage(pageNumber);
+      try {
+        const content = await page.getTextContent();
+        const pageText = extractPdfPageText(content.items).trim();
+        textLength += pageText.length;
+        if (textLength > MAX_TEXT_CHARS) throw new DocumentProcessError("El PDF contiene demasiado texto. Divídelo en partes.", 413);
+        if (pageText) pages.push(pageText);
+      } finally { page.cleanup(); }
+    }
+    return pages.join("\n\n");
+  } finally { await loadingTask.destroy(); }
 }
 
 function ensurePdfRuntimePolyfills() {
@@ -303,18 +332,14 @@ async function extractWebsiteText(url: string) {
     import("@mozilla/readability"),
     import("jsdom"),
   ]);
-  const response = await fetch(url, {
-    headers: {
-      "user-agent": "Lector Documental Raul/1.0",
-    },
-  });
+  const response = await readRemote(url, { allowedContentTypes: ["text/html", "application/xhtml+xml", "text/plain"] });
 
-  if (!response.ok) {
-    throw new Error("No se pudo leer el sitio web. Revisa la liga o intenta con otra página.");
+  if (response.status < 200 || response.status >= 300) {
+    throw new DocumentProcessError("No se pudo obtener el sitio web.", 502);
   }
 
-  const html = await response.text();
-  const dom = new JSDOM(html, { url });
+  const html = response.body.toString("utf8");
+  const dom = new JSDOM(html, { url: response.url });
   const reader = new Readability(dom.window.document);
   const article = reader.parse();
   const text = article?.content
@@ -324,6 +349,7 @@ async function extractWebsiteText(url: string) {
   if (!text) {
     throw new Error("No se encontró texto legible en el sitio web.");
   }
+  checkTextSize(text);
 
   return {
     title: article?.title ?? dom.window.document.title,
@@ -334,25 +360,29 @@ async function extractWebsiteText(url: string) {
 async function extractGoogleDocText(url: string) {
   const docId = getGoogleDocId(url);
   if (!docId) {
-    throw new Error("La liga de Google Docs no tiene un identificador válido.");
+    throw new DocumentProcessError("La liga de Google Docs no tiene un identificador válido.", 400);
   }
 
   const exportUrl = `https://docs.google.com/document/d/${docId}/export?format=txt`;
-  const response = await fetch(exportUrl);
-  if (!response.ok) {
+  const response = await readRemote(exportUrl, { maxBytes: 1_200_000, allowedContentTypes: ["text/plain"] });
+  if (response.status < 200 || response.status >= 300) {
     throw new Error(
       "No se pudo exportar el documento de Google. Debe estar compartido o conectarse con Google Drive.",
     );
   }
 
+  const text = response.body.toString("utf8");
+  checkTextSize(text);
   return {
     title: "Documento de Google",
-    text: await response.text(),
+    text,
   };
 }
 
 function getGoogleDocId(url: string) {
-  const match = url.match(/\/document\/d\/([a-zA-Z0-9_-]+)/);
+  const parsed = new URL(url);
+  if (parsed.protocol !== "https:" || parsed.hostname !== "docs.google.com" || parsed.username || parsed.password || parsed.port) return null;
+  const match = parsed.pathname.match(/^\/document\/d\/([a-zA-Z0-9_-]+)(?:\/|$)/);
   return match?.[1] ?? null;
 }
 
