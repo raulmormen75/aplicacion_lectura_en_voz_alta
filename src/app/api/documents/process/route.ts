@@ -163,6 +163,10 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "La solicitud no tiene un formato válido o supera el límite permitido." }, { status: error.issues.some((issue) => issue.code === "too_big") ? 413 : 400 });
     }
 
+    // Keep diagnostics server-side; never log the request body or document text.
+    console.error("[document-process] Unexpected processing failure", error instanceof Error
+      ? { name: error.name, message: error.message, stack: error.stack?.split("\n").slice(1, 5).join("\n") }
+      : { name: "UnknownError" });
     return NextResponse.json({ error: "No se pudo procesar el contenido. Revisa el formato e intenta nuevamente." }, { status: 500 });
   }
 }
