@@ -38,6 +38,8 @@ El texto se sintetiza localmente con Piper. La voz estándar depende del proveed
 
 En Vercel se usa Next.js con la raíz del repositorio, instalación automática y `npm run build`. No se requiere una API de pago para las dos opciones de voz. La validación local no acredita por sí sola que una nueva versión esté publicada.
 
+`vercel.json` incluye `NODE_OPTIONS=--experimental-require-module` para que el procesador HTML pueda cargar sus dependencias ESM. Vercel desactiva esa compatibilidad por defecto; sin ella, la importación web puede funcionar localmente y fallar en el servidor. Es una opción de ejecución, no una credencial. Referencia: [configuración oficial de Node.js en Vercel](https://vercel.com/docs/functions/runtimes/node-js/advanced-node-configuration#experimental-node.js-require-of-es-module).
+
 ## Variables de entorno
 
 Para la lectura en voz alta del navegador no se necesita ninguna llave de pago.
