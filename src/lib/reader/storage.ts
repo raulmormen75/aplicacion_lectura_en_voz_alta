@@ -7,7 +7,6 @@ const STORAGE_KEY = "lector-documental-raul:v1";
 const CHECKPOINT_KEY = "lector-documental-raul:v2";
 const DATABASE_NAME = "lector-documental-raul";
 const DOCUMENT_STORE = "documents";
-const DEFAULT_BROWSER_VOICE_ID = "browser-default";
 
 export const DEFAULT_READER_STATE: StoredReaderState = {
   document: null,
@@ -20,7 +19,7 @@ export const DEFAULT_READER_STATE: StoredReaderState = {
     updatedAt: new Date(0).toISOString(),
   },
   preferences: {
-    voiceId: DEFAULT_BROWSER_VOICE_ID,
+    voiceId: "piper-updated",
     rate: 1,
     theme: "warm-paper",
     readingMode: "standard",
@@ -51,7 +50,7 @@ const progressSchema = z.object({
 });
 const preferencesSchema = z.object({
   voiceId: identifier,
-  rate: z.union([z.literal(1), z.literal(0.85), z.literal(0.75), z.literal(0.5)]),
+  rate: z.union([z.literal(1), z.literal(0.85), z.literal(0.75), z.literal(0.65), z.literal(0.5)]),
   theme: z.enum(["warm-paper", "night"]),
   readingMode: z.enum(["standard", "focus"]),
 });

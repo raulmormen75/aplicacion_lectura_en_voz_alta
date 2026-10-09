@@ -12,6 +12,7 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "public/reader-assets/**",
+    "output/playwright/**",
     "next-env.d.ts",
   ]),
 ]);

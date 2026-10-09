@@ -6,11 +6,13 @@ import {
   FileText,
   Globe2,
   Headphones,
-  Home,
+  Speech,
+  X,
   Moon,
   Pause,
   Play,
   RotateCcw,
+  RotateCw,
   ScanText,
   SkipBack,
   SkipForward,
@@ -19,6 +21,7 @@ import {
   Type,
 } from "lucide-react";
 import Image from "next/image";
+import { flushSync } from "react-dom";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent, MouseEvent } from "react";
 import {
@@ -38,6 +41,7 @@ import {
 } from "@/lib/reader/storage";
 import { synthesizePiperSpeech } from "@/lib/reader/piper";
 import { buildPiperTimeline, piperWordAtTime } from "@/lib/reader/piper-timing";
+import { paginateBook, pageForWord } from "@/lib/reader/book";
 import type { PiperStage, PiperStatusUpdate } from "@/lib/reader/piper";
 import type {
   PlaybackRate,
@@ -89,8 +93,6 @@ const SAMPLE_TEXT =
   "La lectura científica exige atención, ritmo y continuidad. Esta aplicación convierte documentos largos en una experiencia auditiva clara, con avance guardado, resaltado visual y controles diseñados para retomar el contenido sin perder el hilo.";
 const MAX_CLIENT_UPLOAD_BYTES = 25 * 1024 * 1024;
 const VOICE_LOAD_TIMEOUT_MS = 900;
-const READER_WINDOW_BEFORE = 90;
-const READER_WINDOW_AFTER = 180;
 const STANDARD_VOICE_MODEL_ID: VoiceModelId = "browser-standard";
 const PIPER_VOICE_MODEL_ID: VoiceModelId = "piper-updated";
 const VOICE_MODELS: Array<{
@@ -105,20 +107,23 @@ const VOICE_MODELS: Array<{
   },
   {
     id: PIPER_VOICE_MODEL_ID,
-    label: "Voz actualizada",
-    description: "Usa Piper local con respaldo automático.",
+    label: "Laura",
+    description: "Español de México · voz local para uso personal.",
   },
 ];
 
 export function ReaderApp() {
   const [state, setState] = useState<StoredReaderState>(DEFAULT_READER_STATE);
   const [activePanel, setActivePanel] = useState<"file" | "text" | "web">("file");
+  const [importOpen, setImportOpen] = useState(false);
+  const [spreadSize, setSpreadSize] = useState(1);
   const [pastedText, setPastedText] = useState(SAMPLE_TEXT);
   const [url, setUrl] = useState("");
   const [isProcessing, setIsProcessing] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
   const [focusControlsVisible, setFocusControlsVisible] = useState(true);
   const [statusMessage, setStatusMessage] = useState("Avance guardado en este dispositivo.");
+  const [importError, setImportError] = useState<string | null>(null);
   const [systemVoices, setSystemVoices] = useState<SpeechSynthesisVoice[]>([]);
   const [voiceStartup, setVoiceStartup] = useState<VoiceStartupState | null>(null);
   const [isVoiceMenuOpen, setIsVoiceMenuOpen] = useState(false);
@@ -129,7 +134,10 @@ export function ReaderApp() {
   const [storageWarning, setStorageWarning] = useState("");
   const processingAbortRef = useRef<AbortController | null>(null);
   const voiceAbortRef = useRef<AbortController | null>(null);
+  const prefetchAbortRef = useRef<AbortController | null>(null);
   const focusDockRef = useRef<HTMLElement | null>(null);
+  const playerDockRef = useRef<HTMLElement | null>(null);
+  const readerHeaderRef = useRef<HTMLElement | null>(null);
   const voiceDialogRef = useRef<HTMLDialogElement | null>(null);
   const storageEnabledRef = useRef(false);
   const utteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
@@ -151,6 +159,7 @@ export function ReaderApp() {
   const piperAudioUrlRef = useRef<string | null>(null);
 
   const document = state.document;
+  const hasDocument = Boolean(document);
   const preferences = state.preferences;
   const selectedVoiceModel: VoiceModelId =
     preferences.voiceId === PIPER_VOICE_MODEL_ID ? PIPER_VOICE_MODEL_ID : STANDARD_VOICE_MODEL_ID;
@@ -195,6 +204,8 @@ export function ReaderApp() {
       if (advanceSession) playbackSessionRef.current += 1;
       voiceAbortRef.current?.abort();
       voiceAbortRef.current = null;
+      prefetchAbortRef.current?.abort();
+      prefetchAbortRef.current = null;
       window.speechSynthesis?.cancel();
       stopPiperAudio();
       clearProgressTimer();
@@ -217,18 +228,19 @@ export function ReaderApp() {
     const bodyBlocks = textBlocks.filter(isParagraphNavigationTarget);
     return bodyBlocks.length ? bodyBlocks : textBlocks.filter((block) => block.wordCount > 0);
   }, [textBlocks]);
-  const visibleTextBlocks = useMemo(() => {
+  const bookPages = useMemo(() => paginateBook(textBlocks, tokens.length), [textBlocks, tokens.length]);
+  const activePage = pageForWord(bookPages, currentWord);
+  const spreadStart = Math.floor(activePage / spreadSize) * spreadSize;
+  const visiblePages = useMemo(() => {
     if (!document || tokens.length === 0) return [];
-
-    const windowAnchor = Math.floor(currentWord / READER_WINDOW_BEFORE) * READER_WINDOW_BEFORE;
-    const startWord = Math.max(0, windowAnchor - READER_WINDOW_BEFORE);
-    const endWord = Math.min(tokens.length, windowAnchor + READER_WINDOW_AFTER);
+    return bookPages.slice(spreadStart, spreadStart + spreadSize).map((page, offset) => {
+    const { startWord, endWord } = page;
     const visibleWords = tokens.slice(startWord, endWord);
     const windowStart = startWord === 0 ? 0 : visibleWords[0]?.start ?? 0;
     // Include punctuation after the last visible word, including the document's ending.
     const windowEnd = tokens[endWord]?.start ?? document.cleanText.length;
 
-    return textBlocks
+    const blocks = textBlocks
       .filter((block) => block.end > windowStart && block.start < windowEnd)
       .map((block) => ({
         id: block.id,
@@ -242,7 +254,9 @@ export function ReaderApp() {
         }),
       }))
       .filter((block) => block.parts.length > 0);
-  }, [currentWord, document, textBlocks, tokens]);
+    return { number: spreadStart + offset + 1, blocks };
+    });
+  }, [spreadStart, spreadSize, bookPages, document, textBlocks, tokens]);
   const percentage = calculatePercentage(document?.wordCount ?? 0, currentWord);
   const remainingSeconds = estimateRemainingSeconds(
     document?.wordCount ?? 0,
@@ -284,6 +298,34 @@ export function ReaderApp() {
   useEffect(() => {
     selectedVoiceModelRef.current = selectedVoiceModel;
   }, [selectedVoiceModel]);
+
+  useEffect(() => {
+    const query = window.matchMedia("(min-width: 900px)");
+    const resize = () => setSpreadSize(query.matches ? 2 : 1);
+    resize();
+    query.addEventListener("change", resize);
+    return () => query.removeEventListener("change", resize);
+  }, []);
+
+  useEffect(() => {
+    const dock = playerDockRef.current;
+    if (!dock) return;
+    const root = globalThis.document.documentElement;
+    const header = readerHeaderRef.current;
+    const measure = () => {
+      root.style.setProperty("--player-dock-height", `${dock.getBoundingClientRect().height + 20}px`);
+      root.style.setProperty("--reader-header-height", `${header?.getBoundingClientRect().height ?? 72}px`);
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(dock);
+    if (header) observer.observe(header);
+    return () => {
+      observer.disconnect();
+      root.style.removeProperty("--player-dock-height");
+      root.style.removeProperty("--reader-header-height");
+    };
+  }, [hasDocument, preferences.readingMode, isHydrated]);
 
   useEffect(() => {
     const dialog = voiceDialogRef.current;
@@ -365,11 +407,17 @@ export function ReaderApp() {
     if (readingPane) {
       const paneRect = readingPane.getBoundingClientRect();
       const wordRect = activeWord.getBoundingClientRect();
+      const dock = preferences.readingMode === "focus" ? focusDockRef.current : playerDockRef.current;
+      const dockRect = dock?.getBoundingClientRect();
+      const bottom = dockRect && dockRect.height > 0 && dockRect.top > paneRect.top
+        ? Math.min(paneRect.bottom, dockRect.top)
+        : paneRect.bottom;
+      const visibleHeight = Math.max(1, bottom - paneRect.top);
       // Keep the active line visible without restarting smooth scroll on every word.
-      if (wordRect.top >= paneRect.top + readingPane.clientHeight * 0.18 &&
-          wordRect.bottom <= paneRect.top + readingPane.clientHeight * 0.72) return;
+      if (wordRect.top >= paneRect.top + visibleHeight * 0.18 &&
+          wordRect.bottom <= paneRect.top + visibleHeight * 0.72) return;
       const nextTop =
-        readingPane.scrollTop + wordRect.top - paneRect.top - readingPane.clientHeight * 0.46;
+        readingPane.scrollTop + wordRect.top - paneRect.top - visibleHeight * 0.46;
 
       readingPane.scrollTo({
         top: Math.max(0, nextTop),
@@ -452,9 +500,11 @@ export function ReaderApp() {
   }
 
   function setDocument(nextDocument: ReaderDocument) {
+    setImportError(null);
     storageEnabledRef.current = true;
     stopPlayback();
     setIsPlaying(false);
+    setImportOpen(false);
 
     setState((current) => ({
       ...current,
@@ -497,14 +547,15 @@ export function ReaderApp() {
 
   async function processFile(file: File | null) {
     if (!file || processingAbortRef.current) return;
+    setImportError(null);
 
     if (file.size <= 0) {
-      setStatusMessage("El archivo llegó vacío. En móvil, descarga el PDF desde Drive y vuelve a seleccionarlo.");
+      setImportError("El archivo llegó vacío. Descárgalo primero y vuelve a seleccionarlo.");
       return;
     }
 
     if (file.size > MAX_CLIENT_UPLOAD_BYTES) {
-      setStatusMessage("El archivo es demasiado grande. Usa un PDF menor a 25 MB.");
+      setImportError("El archivo es demasiado grande. Usa un PDF menor a 25 MB.");
       return;
     }
 
@@ -527,13 +578,13 @@ export function ReaderApp() {
         ocrAvailable: result.needsReview,
       });
       if (!prepared.wordCount) {
-        setStatusMessage("No se encontró texto para escuchar. El documento anterior se conserva.");
+        setImportError("No se encontró texto para escuchar. El documento anterior se conserva.");
         return;
       }
       setDocument(prepared);
       setStatusMessage(result.usedOcr ? "OCR terminado. Revisa nombres y cifras antes de escuchar." : "Archivo listo para escuchar.");
     } catch (error) {
-      setStatusMessage(controller.signal.aborted ? "Importación cancelada." : error instanceof Error ? error.message : "No se pudo procesar el archivo.");
+      if (!controller.signal.aborted) setImportError(error instanceof Error ? error.message : "No se pudo procesar el archivo.");
     } finally {
       if (processingAbortRef.current === controller) processingAbortRef.current = null;
       setIsProcessing(false);
@@ -542,20 +593,22 @@ export function ReaderApp() {
 
   async function processText() {
     if (processingAbortRef.current) return;
-    if (!pastedText.trim()) { setStatusMessage("Pega texto antes de continuar."); return; }
+    setImportError(null);
+    if (!pastedText.trim()) { setImportError("Pega texto antes de continuar."); return; }
     setStatusMessage("Limpiando texto pegado.");
     try {
       const prepared = createDocumentFromText({source: "pastedText", title: "Texto pegado", sourceLabel: "Texto pegado", text: pastedText, ocrAvailable: false});
-      if (!prepared.wordCount) { setStatusMessage("No se encontró texto para escuchar."); return; }
+      if (!prepared.wordCount) { setImportError("No se encontró texto para escuchar."); return; }
       setPastedText(prepared.cleanText);
       setDocument(prepared);
     } catch {
-      setStatusMessage("No se pudo preparar el texto. Prueba con un fragmento menor.");
+      setImportError("No se pudo preparar el texto. Prueba con un fragmento menor.");
     }
   }
 
   async function processUrl() {
     if (processingAbortRef.current) return;
+    setImportError(null);
     const controller = new AbortController();
     processingAbortRef.current = controller;
     const targetUrl = url;
@@ -575,9 +628,9 @@ export function ReaderApp() {
 
       if (controller.signal.aborted) return;
       if (data.document) setDocument(data.document);
-      else setStatusMessage(data.error ?? "No se pudo procesar la liga.");
+      else setImportError(data.error ?? "No se pudo procesar la liga.");
     } catch {
-      setStatusMessage(controller.signal.aborted ? "Importación cancelada." : "No se pudo conectar con el procesador de sitios web.");
+      if (!controller.signal.aborted) setImportError("No se pudo conectar con el procesador de sitios web.");
     } finally {
       if (processingAbortRef.current === controller) processingAbortRef.current = null;
       setIsProcessing(false);
@@ -715,7 +768,7 @@ export function ReaderApp() {
     return lang.startsWith("es-");
   }
 
-  function getSpeechWindow(fromWord: number) {
+  function getSpeechWindow(fromWord: number, voiceModel = selectedVoiceModelRef.current) {
     if (!document) return null;
 
     const safeFromWord = Math.max(0, Math.min(fromWord, document.wordCount));
@@ -725,9 +778,19 @@ export function ReaderApp() {
     const chunkTokens = tokenizeWords(chunk.cleanText);
     const localStartWord = Math.max(0, safeFromWord - chunk.startWord);
     const startChar = chunkTokens[localStartWord]?.start ?? 0;
-    const textToSpeak = chunk.cleanText.slice(startChar).trim();
+    let localEndWord = chunkTokens.length;
+    if (voiceModel === PIPER_VOICE_MODEL_ID) {
+      localEndWord = Math.min(localStartWord + 40, chunkTokens.length);
+      // Prefer a sentence ending while keeping startup synthesis small.
+      for (let index = localEndWord - 1; index >= localStartWord + 12; index--) {
+        const after = chunk.cleanText.slice(chunkTokens[index].end, chunkTokens[index + 1]?.start ?? chunk.cleanText.length);
+        if (/[.!?]/u.test(after) || /[.!?]$/u.test(chunkTokens[index].text)) { localEndWord = index + 1; break; }
+      }
+    }
+    const endChar = chunkTokens[localEndWord]?.start ?? chunk.cleanText.length;
+    const textToSpeak = chunk.cleanText.slice(startChar, endChar).trim();
     const speechBaseWord = chunk.startWord + localStartWord;
-    const chunkEndWord = Math.min(chunk.startWord + chunk.wordCount, document.wordCount);
+    const chunkEndWord = Math.min(chunk.startWord + localEndWord, document.wordCount);
 
     return {
       chunk,
@@ -826,7 +889,7 @@ export function ReaderApp() {
       clearPiperProgressTracker();
     }
 
-    const speechWindow = getSpeechWindow(fromWord);
+    const speechWindow = getSpeechWindow(fromWord, voiceModel);
     if (!speechWindow) {
       clearProgressTimer();
       setIsPlaying(false);
@@ -850,6 +913,7 @@ export function ReaderApp() {
         activeSession,
         rate,
         voiceModel,
+        showStartup: sessionId === undefined,
       });
       return;
     }
@@ -955,15 +1019,16 @@ export function ReaderApp() {
     activeSession: number;
     rate: PlaybackRate;
     voiceModel: VoiceModelId;
+    showStartup: boolean;
   }) {
     window.speechSynthesis?.cancel();
     stopPiperAudio();
     setIsPlaying(false);
-    setStatusMessage("Preparando voz actualizada.");
-    updateVoiceStartupStatus({
+    setStatusMessage("Preparando a Laura.");
+    if (params.showStartup) updateVoiceStartupStatus({
       stage: "preparing",
-      message: "Preparando voz actualizada",
-      detail: "La voz local se inicia en este navegador antes de comenzar la lectura.",
+      message: "Preparando a Laura",
+      detail: "Preparando la voz en este dispositivo.",
     });
 
     let acceptingStatus = true;
@@ -982,7 +1047,7 @@ export function ReaderApp() {
         signal: controller.signal,
         text: params.textToSpeak,
         onStatus: (update) => {
-          if (acceptingStatus && playbackSessionRef.current === params.activeSession) updateVoiceStartupStatus(update);
+          if (params.showStartup && acceptingStatus && playbackSessionRef.current === params.activeSession) updateVoiceStartupStatus(update);
         },
       });
       acceptingStatus = false;
@@ -996,10 +1061,10 @@ export function ReaderApp() {
         bytes: result.audio.size,
       });
 
-      updateVoiceStartupStatus({
+      if (params.showStartup) updateVoiceStartupStatus({
         stage: "playing",
-        message: "Voz actualizada lista",
-        detail: "Iniciando lectura.",
+        message: "Laura está lista",
+        detail: "Iniciando el audio.",
       });
       await startPiperAudioPlayback(params, result.audio);
     } catch (error) {
@@ -1110,7 +1175,17 @@ export function ReaderApp() {
     );
     setVoiceStartup(null);
     setIsPlaying(true);
-    setStatusMessage("Lectura iniciada con Voz actualizada.");
+    setStatusMessage("Reproduciendo con Laura.");
+    const next = getSpeechWindow(params.chunkEndWord, PIPER_VOICE_MODEL_ID);
+    if (next && shouldContinuePlaybackRef.current) {
+      prefetchAbortRef.current?.abort();
+      const controller = new AbortController();
+      prefetchAbortRef.current = controller;
+      // Use the engine's bounded in-memory cache; do not retain document audio on a server.
+      void synthesizePiperSpeech({ text: next.textToSpeak, signal: controller.signal })
+        .catch(error => { if (!controller.signal.aborted) console.warn("[Piper TTS] Preparación anticipada no disponible", error); })
+        .finally(() => { if (prefetchAbortRef.current === controller) prefetchAbortRef.current = null; });
+    }
   }
 
   async function fallbackToBrowserVoice(
@@ -1148,7 +1223,7 @@ export function ReaderApp() {
       rate: playbackRateRef.current,
       voiceModel: STANDARD_VOICE_MODEL_ID,
       preferredSystemVoice,
-      statusMessage: "La Voz actualizada no pudo iniciar. Se usó Voz estándar.",
+      statusMessage: "Laura no pudo iniciar. Se usó Voz estándar.",
     });
   }
 
@@ -1199,15 +1274,15 @@ export function ReaderApp() {
               activeSegment?.textToSpeak,
             );
             setIsPlaying(true);
-            setStatusMessage("Lectura reanudada con Voz actualizada.");
+            setStatusMessage("Audio reanudado con Laura.");
           })
           .catch((error: unknown) => {
             if (playbackSessionRef.current !== session || piperAudioRef.current !== audio) return;
             setIsPlaying(false);
             setStatusMessage(
               error instanceof Error
-                ? `No se pudo reanudar la Voz actualizada: ${error.message}`
-                : "No se pudo reanudar la Voz actualizada.",
+                ? `No se pudo reanudar a Laura: ${error.message}`
+                : "No se pudo reanudar a Laura.",
             );
           });
         return;
@@ -1325,7 +1400,9 @@ export function ReaderApp() {
     if (activeLineIndex < 0) return getFallbackLineNavigationWord(direction);
 
     const targetLine = lineTargets[activeLineIndex + direction];
-    return targetLine?.startWord ?? currentWord;
+    if (targetLine) return targetLine.startWord;
+    const page = bookPages[activePage + direction];
+    return page ? (direction > 0 ? page.startWord : page.endWord - 1) : currentWord;
   }
 
   function getFallbackLineNavigationWord(direction: -1 | 1) {
@@ -1340,11 +1417,18 @@ export function ReaderApp() {
   function jumpToLine(direction: -1 | 1) {
     if (!document) return;
 
-    const targetWord = getLineNavigationWord(direction);
+    let targetWord = getLineNavigationWord(direction);
     if (targetWord === currentWord) return;
 
     const wasPlaying = isPlaying;
     stopPlayback();
+    if (direction < 0 && !globalThis.document.querySelector(`.document-text .word[data-word-index="${targetWord}"]`)) {
+      // Render the preceding page before measuring its last visual line.
+      flushSync(() => updateProgress(targetWord));
+      const pane = globalThis.document.querySelector(".document-text");
+      const line = pane && getRenderedLineTargets(pane).find(item => targetWord >= item.startWord && targetWord <= item.endWord);
+      if (line) targetWord = line.startWord;
+    }
     updateProgress(targetWord);
     setIsPlaying(false);
     setStatusMessage(
@@ -1354,6 +1438,22 @@ export function ReaderApp() {
     if (wasPlaying) {
       void startSpeech(targetWord);
     }
+  }
+
+  function turnBookPage(direction: -1 | 1) {
+    const target = bookPages[spreadStart + direction * spreadSize];
+    if (!target) return;
+    const wasPlaying = isPlaying;
+    stopPlayback();
+    updateProgress(target.startWord);
+    setIsPlaying(false);
+    if (wasPlaying) void startSpeech(target.startWord);
+  }
+
+  function openImport(panel: "file" | "text" | "web") {
+    setImportError(null);
+    setActivePanel(panel);
+    setImportOpen(true);
   }
 
   function changeRate(rate: PlaybackRate) {
@@ -1426,7 +1526,7 @@ export function ReaderApp() {
     setIsVoiceMenuOpen(false);
     setStatusMessage(
       modelId === PIPER_VOICE_MODEL_ID
-        ? "Voz actualizada seleccionada. Si no inicia, se usará Voz estándar."
+        ? "Laura seleccionada. Si no inicia, se usará Voz estándar."
         : "Voz estándar seleccionada.",
     );
   }
@@ -1523,29 +1623,28 @@ export function ReaderApp() {
           <div className="player-action-row">
             <div className="transport">
               <button type="button" onClick={() => seek(-10)} aria-label="Retroceder 10 segundos">
-                <ChevronLeft size={18} />
-                10 s
+                <RotateCcw size={20} aria-hidden="true" />
+                <span>10 s</span>
               </button>
               <button type="button" onClick={() => seek(-5)} aria-label="Retroceder 5 segundos">
-                <ChevronLeft size={18} />
-                5 s
+                <RotateCcw size={20} aria-hidden="true" />
+                <span>5 s</span>
               </button>
-              <button className="play-button" type="button" onClick={togglePlayback}>
+              <button className="play-button" type="button" onClick={togglePlayback} aria-label={isPlaying ? "Pausar" : "Reproducir"} title={isPlaying ? "Pausar" : "Reproducir"}>
                 {isPlaying ? <Pause size={22} /> : <Play size={22} />}
-                {isPlaying ? "Pausar" : "Reproducir"}
               </button>
               <button type="button" onClick={() => seek(5)} aria-label="Adelantar 5 segundos">
-                5 s
-                <ChevronRight size={18} />
+                <RotateCw size={20} aria-hidden="true" />
+                <span>5 s</span>
               </button>
               <button type="button" onClick={() => seek(10)} aria-label="Adelantar 10 segundos">
-                10 s
-                <ChevronRight size={18} />
+                <RotateCw size={20} aria-hidden="true" />
+                <span>10 s</span>
               </button>
             </div>
 
             <div className="speed-control" aria-label="Velocidad de lectura">
-              {([1, 0.85, 0.75, 0.5] as PlaybackRate[]).map((rate) => (
+              {([1, 0.85, 0.75, 0.65, 0.5] as PlaybackRate[]).map((rate) => (
                 <button
                   key={rate}
                   type="button"
@@ -1590,7 +1689,7 @@ export function ReaderApp() {
           title="Cambiar modelo de voz"
           onClick={() => setIsVoiceMenuOpen((isOpen) => !isOpen)}
         >
-          <SpeakingLipsIcon size={19} />
+          <Speech size={19} />
           <span>{activeModel.label}</span>
         </button>
 
@@ -1624,6 +1723,7 @@ export function ReaderApp() {
                 <small>{model.description}</small>
               </button>
             ))}
+            <small className="voice-credit"><a href="https://huggingface.co/HirCoir/Piper-TTS-Laura" target="_blank" rel="noreferrer">Laura por HirCoir · CC BY-NC 4.0</a></small>
           </div>
         ) : null}
       </div>
@@ -1637,7 +1737,7 @@ export function ReaderApp() {
       <dialog ref={voiceDialogRef} className="voice-startup-overlay" aria-labelledby="voice-startup-title" onCancel={() => { stopPlayback(); setIsPlaying(false); }}>
         <div className="voice-startup-modal" data-voice-status={voiceStartup.status}>
           <div className="voice-startup-icon" aria-hidden="true">
-            <SpeakingLipsIcon size={24} />
+            <Speech size={24} />
           </div>
           <div>
             <p className="tool-title">Modelo de voz</p>
@@ -1673,29 +1773,28 @@ export function ReaderApp() {
 
         <div className="focus-transport" aria-label="Reproducción">
           <button type="button" onClick={() => seek(-10)} aria-label="Retroceder 10 segundos">
-            <ChevronLeft size={15} />
-            10 s
+            <RotateCcw size={20} aria-hidden="true" />
+            <span>10 s</span>
           </button>
           <button type="button" onClick={() => seek(-5)} aria-label="Retroceder 5 segundos">
-            <ChevronLeft size={15} />
-            5 s
+            <RotateCcw size={20} aria-hidden="true" />
+            <span>5 s</span>
           </button>
-          <button className="focus-play-button" type="button" onClick={togglePlayback}>
+          <button className="focus-play-button" type="button" onClick={togglePlayback} aria-label={isPlaying ? "Pausar" : "Reproducir"} title={isPlaying ? "Pausar" : "Reproducir"}>
             {isPlaying ? <Pause size={18} /> : <Play size={18} />}
-            {isPlaying ? "Pausar" : "Reproducir"}
           </button>
           <button type="button" onClick={() => seek(5)} aria-label="Adelantar 5 segundos">
-            5 s
-            <ChevronRight size={15} />
+            <RotateCw size={20} aria-hidden="true" />
+            <span>5 s</span>
           </button>
           <button type="button" onClick={() => seek(10)} aria-label="Adelantar 10 segundos">
-            10 s
-            <ChevronRight size={15} />
+            <RotateCw size={20} aria-hidden="true" />
+            <span>10 s</span>
           </button>
         </div>
 
         <div className="focus-speed" aria-label="Velocidad">
-          {([1, 0.85, 0.75, 0.5] as PlaybackRate[]).map((rate) => (
+          {([1, 0.85, 0.75, 0.65, 0.5] as PlaybackRate[]).map((rate) => (
             <button
               key={rate}
               type="button"
@@ -1746,6 +1845,7 @@ export function ReaderApp() {
           onClick={() => jumpToParagraph(-1)}
           disabled={previousDisabled}
           aria-label="Párrafo anterior"
+          title="Párrafo anterior"
         >
           <SkipBack size={iconSize} />
           <span>Párrafo</span>
@@ -1755,6 +1855,7 @@ export function ReaderApp() {
           onClick={() => jumpToLine(-1)}
           disabled={!document}
           aria-label="Línea anterior"
+          title="Línea anterior"
         >
           <ChevronLeft size={iconSize} />
           <span>Línea</span>
@@ -1764,6 +1865,7 @@ export function ReaderApp() {
           onClick={() => jumpToLine(1)}
           disabled={!document}
           aria-label="Siguiente línea"
+          title="Siguiente línea"
         >
           <span>Línea</span>
           <ChevronRight size={iconSize} />
@@ -1773,6 +1875,7 @@ export function ReaderApp() {
           onClick={() => jumpToParagraph(1)}
           disabled={nextDisabled}
           aria-label="Siguiente párrafo"
+          title="Siguiente párrafo"
         >
           <span>Párrafo</span>
           <SkipForward size={iconSize} />
@@ -1784,28 +1887,24 @@ export function ReaderApp() {
   function renderModeControls(className = "") {
     return (
       <div className={`tool-group mode-controls ${className}`.trim()}>
-        <p className="tool-title">Modos</p>
         <button
           type="button"
-          className={preferences.theme === "warm-paper" ? "mode-button active" : "mode-button"}
-          aria-pressed={preferences.theme === "warm-paper"}
-          onClick={() => updatePreferences({ theme: "warm-paper" })}
+          className="mode-button"
+          title={preferences.theme === "night" ? "Papel cálido" : "Lectura nocturna"}
+          aria-label={preferences.theme === "night" ? "Papel cálido" : "Lectura nocturna"}
+          onClick={toggleFocusTheme}
         >
-          <SunMedium size={18} />
-          Papel cálido
+          {preferences.theme === "night" ? <SunMedium size={18} /> : <Moon size={18} />}
         </button>
         <button
           type="button"
-          className={preferences.theme === "night" ? "mode-button active" : "mode-button"}
-          aria-pressed={preferences.theme === "night"}
-          onClick={() => updatePreferences({ theme: "night" })}
+          className="mode-button"
+          aria-label="Pantalla completa"
+          title="Pantalla completa"
+          onClick={toggleFocusMode}
+          disabled={!document}
         >
-          <Moon size={18} />
-          Lectura nocturna
-        </button>
-        <button type="button" className="mode-button" onClick={toggleFocusMode}>
           <ScanText size={18} />
-          Pantalla completa
         </button>
       </div>
     );
@@ -1815,43 +1914,31 @@ export function ReaderApp() {
 
   return (
     <main
-      className={`reader-shell theme-${preferences.theme} mode-${preferences.readingMode} ${
+      className={`reader-shell book-layout theme-${preferences.theme} mode-${preferences.readingMode} ${
         document ? "has-document" : "empty-state"
       }`}
     >
       <p className="status-accessible" role="status" aria-live="polite">{statusMessage}</p>
       {storageWarning ? <p role="alert" className="storage-warning">{storageWarning}</p> : null}
-      <header className="reader-topbar">
-        <div className="file-identity">
-          <span className="file-icon">
+      <header ref={readerHeaderRef} className="reader-topbar">
+        <div className="app-brand" aria-label="En voz">
             <Image
-              src="/icons/lector-documental-icon-headphones.png"
+              src="/icons/en-voz-192.png"
               alt=""
-              width={44}
-              height={44}
+              width={32}
+              height={32}
               priority
               unoptimized
             />
-          </span>
-          <div>
-            <p className="eyeless-label">Archivo actual</p>
-            <h1>{document?.title ?? "Lector Documental Raul"}</h1>
-          </div>
+          <span>En voz</span>
         </div>
 
-      </header>
-
-      <section className="workspace-grid">
-        <aside className="home-panel">
-          <button className="home-title" type="button" onClick={() => setActivePanel("file")}>
-            <Home size={18} />
-            <span>Casa</span>
-          </button>
+        <nav className="source-navigation" aria-label="Agregar contenido">
           <button
             className={activePanel === "file" ? "home-action active" : "home-action"}
             aria-pressed={activePanel === "file"}
             type="button"
-            onClick={() => setActivePanel("file")}
+            onClick={() => openImport("file")}
           >
             <FileText size={22} />
             <span>Subir archivo</span>
@@ -1860,7 +1947,7 @@ export function ReaderApp() {
             className={activePanel === "text" ? "home-action active" : "home-action"}
             aria-pressed={activePanel === "text"}
             type="button"
-            onClick={() => setActivePanel("text")}
+            onClick={() => openImport("text")}
           >
             <Type size={22} />
             <span>Pegar texto</span>
@@ -1869,16 +1956,27 @@ export function ReaderApp() {
             className={activePanel === "web" ? "home-action active" : "home-action"}
             aria-pressed={activePanel === "web"}
             type="button"
-            onClick={() => setActivePanel("web")}
+            onClick={() => openImport("web")}
           >
             <Globe2 size={22} />
             <span>Leer sitio web</span>
           </button>
 
-        </aside>
+        </nav>
+        {document ? (
+          <nav className="book-page-controls" aria-label="Páginas del libro">
+            <button type="button" aria-label="Página anterior" title="Página anterior" onClick={() => turnBookPage(-1)} disabled={spreadStart === 0}><ChevronLeft size={18} /></button>
+            <span aria-live="polite">{spreadStart + 1}{visiblePages.length > 1 ? `–${spreadStart + visiblePages.length}` : ""} / {bookPages.length}</span>
+            <button type="button" aria-label="Página siguiente" title="Página siguiente" onClick={() => turnBookPage(1)} disabled={spreadStart + spreadSize >= bookPages.length}><ChevronRight size={18} /></button>
+          </nav>
+        ) : null}
+        {renderModeControls("book-mode-controls")}
+      </header>
 
+      <section className="workspace-grid">
         <section className="reader-center">
-          <div className="import-panel">
+          {(!document || importOpen || isProcessing) ? <div className="import-panel">
+            {document && !isProcessing ? <button type="button" className="import-close" aria-label="Cerrar importación" title="Cerrar" onClick={() => setImportOpen(false)}><X size={18} /></button> : null}
             {activePanel === "file" ? (
               <div className="input-cluster">
                 <label className="upload-drop">
@@ -1925,26 +2023,13 @@ export function ReaderApp() {
               </div>
             ) : null}
             {isProcessing ? <div className="import-progress"><p>{statusMessage}</p><button type="button" onClick={() => processingAbortRef.current?.abort()}>Cancelar</button></div> : null}
-          </div>
+            {importError ? <p className="import-error" role="alert">{importError}</p> : null}
+          </div> : null}
 
-          {document ? (
-            <>
-              <div className="mobile-player-slot" aria-label="Controles de lectura">
-                <div className="player-dock mobile-player">{renderPlayerControls()}</div>
-              </div>
-              <div className="mobile-modes-slot" aria-label="Modos de lectura">
-                {renderModeControls("mobile-mode-controls")}
-              </div>
-            </>
-          ) : null}
 
           <div className="reader-stage">
             {document ? (
               <article className="reader-document">
-                <div className="reading-metrics">
-                  <span>{formatRemainingTime(remainingSeconds)} restantes</span>
-                  <strong>{percentage}% leído</strong>
-                </div>
                 <div
                   className="document-text"
                   role="region"
@@ -1964,9 +2049,16 @@ export function ReaderApp() {
                       : undefined
                   }
                 >
-                  {visibleTextBlocks.map((block) =>
-                    renderStructuredTextBlock(block, currentWord),
-                  )}
+                  <div className="book-spread">
+                    {visiblePages.map((page) => (
+                      <section className="book-page" key={`${document.id}-${page.number}`} aria-label={`Página ${page.number}`}>
+                        <header className="book-page-heading"><span>{document.title}</span></header>
+                        <div className="book-page-body">{page.blocks.map((block) => renderStructuredTextBlock(block, currentWord))}</div>
+                        <footer className="book-folio">{page.number}</footer>
+                      </section>
+                    ))}
+                    {spreadSize === 2 && visiblePages.length === 1 ? <section className="book-page book-page-blank" aria-hidden="true" /> : null}
+                  </div>
                 </div>
               </article>
             ) : (
@@ -1978,8 +2070,7 @@ export function ReaderApp() {
           </div>
         </section>
 
-        <aside className="library-panel">
-          {renderModeControls("desktop-mode-controls")}
+        {shouldShowTextReview ? <aside className="library-panel">
 
           {shouldShowTextReview ? (
             <div className="ocr-card">
@@ -2005,14 +2096,10 @@ export function ReaderApp() {
             </div>
           ) : null}
 
-          <div className="status-rail">
-            <span className={isProcessing ? "status-dot busy" : "status-dot"} />
-            <p>{statusMessage}</p>
-          </div>
-        </aside>
+        </aside> : null}
       </section>
 
-      {document ? <footer className="player-dock desktop-player">
+      {document ? <footer ref={playerDockRef} className="player-dock desktop-player">
         {renderPlayerControls()}
       </footer> : null}
 
@@ -2020,46 +2107,6 @@ export function ReaderApp() {
 
       {preferences.readingMode === "focus" && focusControlsVisible ? renderFocusControls() : null}
     </main>
-  );
-}
-
-function SpeakingLipsIcon({ size = 20 }: { size?: number }) {
-  return (
-    <svg
-      aria-hidden="true"
-      width={size}
-      height={size}
-      viewBox="0 0 24 24"
-      fill="none"
-      xmlns="http://www.w3.org/2000/svg"
-    >
-      <path
-        d="M3.75 11.25c1.32-1.9 2.72-2.85 4.2-2.85 1.12 0 1.82.44 2.44.83.53.33 1 .62 1.61.62s1.08-.29 1.61-.62c.62-.39 1.32-.83 2.44-.83 1.48 0 2.88.95 4.2 2.85"
-        stroke="currentColor"
-        strokeWidth="1.7"
-        strokeLinecap="round"
-      />
-      <path
-        d="M3.75 12.15c1.65 2.25 4.18 3.45 8.25 3.45s6.6-1.2 8.25-3.45c-1.78-.42-3.15-.34-4.46.08-1.29.42-2.25 1.02-3.79 1.02s-2.5-.6-3.79-1.02c-1.31-.42-2.68-.5-4.46-.08Z"
-        stroke="currentColor"
-        strokeWidth="1.7"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-      <path
-        d="M12 9.85v3.4"
-        stroke="currentColor"
-        strokeWidth="1.25"
-        strokeLinecap="round"
-        opacity="0.7"
-      />
-      <path
-        d="M20.2 7.2c.7.58 1.16 1.32 1.38 2.22M21.95 5.35c1.08.92 1.75 2.07 2 3.46"
-        stroke="currentColor"
-        strokeWidth="1.35"
-        strokeLinecap="round"
-      />
-    </svg>
   );
 }
 
@@ -2082,6 +2129,7 @@ function getRenderedLineTargets(readingPane: Element) {
       const rect = element.getBoundingClientRect();
       return {
         wordIndex,
+        page: element.closest(".book-page"),
         left: rect.left,
         top: rect.top,
         height: rect.height,
@@ -2097,6 +2145,7 @@ function getRenderedLineTargets(readingPane: Element) {
     .sort((a, b) => a.top - b.top || a.left - b.left);
 
   const lines: Array<{
+    page: Element | null;
     top: number;
     tolerance: number;
     words: typeof renderedWords;
@@ -2104,7 +2153,7 @@ function getRenderedLineTargets(readingPane: Element) {
 
   for (const word of renderedWords) {
     const tolerance = Math.max(6, word.height * 0.52);
-    const existingLine = lines.find((line) => Math.abs(line.top - word.top) <= line.tolerance);
+    const existingLine = lines.find((line) => line.page === word.page && Math.abs(line.top - word.top) <= line.tolerance);
 
     if (existingLine) {
       existingLine.words.push(word);
@@ -2114,6 +2163,7 @@ function getRenderedLineTargets(readingPane: Element) {
     }
 
     lines.push({
+      page: word.page,
       top: word.top,
       tolerance,
       words: [word],

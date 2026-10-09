@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
+import "./reader-book.css";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -13,12 +14,13 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Lector Documental Raul",
-  description: "Aplicación para escuchar documentos, textos y sitios web con avance sincronizado.",
+  title: "En voz",
+  description: "Escucha documentos, textos y sitios web con tu avance guardado en este dispositivo.",
+  icons: { icon: "/icons/en-voz-192.png", apple: "/icons/en-voz-192.png" },
   manifest: "/manifest.webmanifest",
   appleWebApp: {
     capable: true,
-    title: "Lector Raul",
+    title: "En voz",
   },
 };
 

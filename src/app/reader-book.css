@@ -1,0 +1,1111 @@
+/* Load after globals.css. Pagination and dock measurements remain in ReaderApp. */
+.reader-shell.book-layout {
+  --book-desk: #343638;
+  --book-paper: #f2f2ee;
+  --book-ink: #292926;
+  --book-muted: #65655d;
+  --book-rule: #d5d5cd;
+  --book-chrome: #242625;
+  --book-highlight: #fff0ac;
+  --paper: var(--book-paper);
+  --paper-ink: var(--book-ink);
+  --muted: #bdbdb5;
+  --border: #ffffff24;
+  min-width: 0;
+  min-height: 100dvh;
+  padding: 0;
+  background: var(--book-desk);
+  color: var(--ivory);
+  letter-spacing: 0;
+}
+
+.reader-shell.book-layout.theme-night {
+  --book-desk: #151716;
+  --book-paper: #252725;
+  --book-ink: #e3e1d8;
+  --book-muted: #aaa99f;
+  --book-rule: #41433f;
+  --book-highlight: #d8b85e;
+  color-scheme: dark;
+}
+
+.book-layout :where(button, input, textarea, select) {
+  max-width: 100%;
+  touch-action: manipulation;
+  letter-spacing: 0;
+}
+
+.book-layout :where(button, a, input, textarea, select):focus-visible {
+  outline: 2px solid var(--gold);
+  outline-offset: 3px;
+  box-shadow: none;
+}
+
+.book-layout :where(button):disabled {
+  opacity: 0.4;
+}
+
+.book-layout .reader-topbar {
+  position: relative;
+  top: auto;
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px 24px;
+  width: 100%;
+  max-width: none;
+  min-height: 72px;
+  margin: 0;
+  padding: 12px 30px;
+  border-bottom: 1px solid #ffffff14;
+  background: var(--black);
+}
+
+.book-layout .app-brand {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 9px;
+  color: var(--ivory);
+  font-size: 19px;
+  font-weight: 650;
+  line-height: 1.2;
+  text-decoration: none;
+}
+
+.book-layout .app-brand img {
+  display: block;
+  width: 32px;
+  height: 32px;
+  flex: 0 0 32px;
+  object-fit: contain;
+}
+
+.book-layout .eyeless-label {
+  color: var(--gold);
+  font-size: 10px;
+  font-weight: 500;
+}
+
+.book-layout .source-navigation {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-width: 0;
+  margin-left: auto;
+}
+
+.book-layout .source-navigation .home-action {
+  display: inline-flex;
+  flex-direction: row;
+  justify-content: center;
+  gap: 8px;
+  width: auto;
+  min-height: 44px;
+  margin: 0;
+  border: 0;
+  border-radius: 4px;
+  padding: 0 10px;
+  background: transparent;
+  color: #dbdbd5;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.book-layout .source-navigation .home-action span {
+  font-size: inherit;
+  font-weight: inherit;
+}
+
+.book-layout .source-navigation svg {
+  width: 18px;
+  height: 18px;
+  color: currentColor;
+}
+
+.book-layout .source-navigation :is(.active, [aria-current="true"], [aria-pressed="true"]) {
+  color: var(--gold);
+  background: #ffffff0d;
+}
+
+.book-layout .book-mode-controls {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 4px;
+  border-bottom: 0;
+  border-left: 1px solid var(--border);
+  padding-bottom: 0;
+  padding-left: 16px;
+}
+
+.book-layout :is(.book-mode-controls, .book-page-controls) button,
+.book-layout .import-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 44px;
+  width: 44px;
+  min-height: 44px;
+  border: 0;
+  border-radius: 4px;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+}
+
+.book-layout :is(.source-navigation, .book-mode-controls, .book-page-controls) button:hover:not(:disabled),
+.book-layout .import-close:hover {
+  background: #c6a75e21;
+}
+
+.book-layout .workspace-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 18px;
+  width: 100%;
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: 20px 38px 28px;
+}
+
+.book-layout.has-document:not(.mode-focus) .workspace-grid {
+  /* The measured dock height already includes its safe area and clearance. */
+  padding-bottom: var(--player-dock-height, 176px);
+}
+
+.book-layout .reader-center {
+  width: 100%;
+  min-width: 0;
+}
+
+.book-layout .library-panel {
+  display: flex;
+  flex-direction: column;
+  grid-column: 1 / -1;
+  min-width: 0;
+  gap: 12px;
+  padding: 0;
+  background: transparent;
+  overflow-wrap: anywhere;
+}
+
+.book-layout .library-panel:empty {
+  display: none;
+}
+
+.book-layout .ocr-card {
+  border-radius: 4px;
+  background: #6e1f2838;
+}
+
+.book-layout .import-panel {
+  position: relative;
+  width: 100%;
+  margin: 0 0 18px;
+  padding: 12px 54px 18px 0;
+  border-bottom: 1px solid var(--border);
+  background: transparent;
+}
+
+.book-layout .import-close {
+  position: absolute;
+  top: 4px;
+  right: 0;
+}
+
+.book-layout :is(.input-cluster, .inline-form, .inline-form input) {
+  min-width: 0;
+}
+
+.book-layout :is(.upload-drop, .input-cluster textarea, .inline-form input) {
+  border-radius: 4px;
+}
+
+.book-layout .upload-drop {
+  padding: 12px;
+  overflow-wrap: anywhere;
+}
+
+.book-layout .book-page-controls {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  max-width: 100%;
+  margin: 0;
+  color: #ddded8;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.book-layout .book-page-controls > span {
+  min-width: 0;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+
+.book-layout .reader-stage,
+.book-layout .reader-document {
+  width: 100%;
+  max-width: none;
+  min-height: 0;
+  height: auto;
+  overflow: visible;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--book-ink);
+  box-shadow: none;
+}
+
+/* Keep the current word above the dock; only the pages scroll. */
+.book-layout .document-text {
+  width: 100%;
+  height: max(260px, calc(100dvh - var(--player-dock-height, 176px) - var(--reader-header-height, 72px) - 32px));
+  max-width: none;
+  max-height: none;
+  overflow: auto;
+  padding: 0;
+  scroll-padding-block: 24px;
+  font: 400 18px/1.65 Georgia, "Times New Roman", serif;
+  color: var(--book-ink);
+  overflow-wrap: anywhere;
+}
+
+.book-layout .book-spread {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: stretch;
+  min-height: 100%;
+  height: auto;
+  border-radius: 4px;
+  background: var(--book-paper);
+  box-shadow: 0 16px 36px #0003, 0 4px 0 -1px var(--book-paper), 0 8px 0 -2px var(--book-rule);
+}
+
+.book-layout .book-page {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  padding: 30px 44px 25px;
+  border-radius: 4px;
+  background: var(--book-paper);
+  color: var(--book-ink);
+  overflow-wrap: anywhere;
+}
+
+.book-layout .book-page + .book-page {
+  border-left: 1px solid var(--book-rule);
+  box-shadow: inset 15px 0 20px -22px #0009;
+}
+
+.book-layout .book-page-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  min-width: 0;
+  margin: 0 0 24px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--book-rule);
+  color: var(--book-muted);
+  font: 400 10px/1.5 "Geist", "Segoe UI", sans-serif;
+  text-transform: uppercase;
+}
+
+.book-layout .book-page-heading span:first-child {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.book-layout .book-page-heading span:last-child {
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.book-layout .book-page-body {
+  min-width: 0;
+}
+
+.book-layout .voice-credit {
+  display: block;
+  padding: 8px 12px;
+  font-size: 11px;
+  line-height: 1.5;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.book-layout .voice-credit a {
+  color: inherit;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.book-layout .text-block {
+  margin: 0 0 1em;
+  font-weight: 400;
+  line-height: inherit;
+}
+
+.book-layout .text-block:last-child {
+  margin-bottom: 0;
+}
+
+.book-layout .text-block-heading {
+  margin: 0 0 22px;
+  font-size: 30px;
+  line-height: 1.18;
+  font-weight: 400;
+  text-wrap: balance;
+}
+
+.book-layout .text-block-subheading {
+  margin: 0 0 18px;
+  font-size: 24px;
+  line-height: 1.25;
+  font-weight: 400;
+  text-wrap: balance;
+}
+
+.book-layout .text-block-bullet::before {
+  box-shadow: none;
+}
+
+.book-layout .word {
+  padding: 0;
+  border-radius: 2px;
+}
+
+.book-layout .active-word {
+  background: var(--book-highlight);
+  color: #292926;
+  box-shadow: 2px 0 var(--book-highlight), -2px 0 var(--book-highlight);
+}
+
+.book-layout .book-folio {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  margin-top: auto;
+  padding-top: 25px;
+  color: var(--book-muted);
+  font: 400 14px/1.5 Georgia, "Times New Roman", serif;
+  font-variant-numeric: tabular-nums;
+}
+
+.book-layout .book-page-blank {
+  background: var(--book-paper);
+}
+
+.book-layout .empty-reader {
+  min-height: 280px;
+  color: var(--ivory);
+}
+
+/* One normal-mode dock at every breakpoint, including legacy landscape rules. */
+.book-layout:not(.mode-focus) .player-dock.desktop-player {
+  position: fixed;
+  inset: auto 0 0;
+  z-index: 40;
+  display: grid;
+  width: auto;
+  max-width: none;
+  margin: 0;
+  border: 0;
+  border-top: 1px solid var(--border);
+  border-radius: 0;
+  padding: 14px max(24px, env(safe-area-inset-right, 0px)) calc(12px + env(safe-area-inset-bottom, 0px)) max(24px, env(safe-area-inset-left, 0px));
+  background: var(--book-chrome);
+  box-shadow: 0 -8px 24px #0002;
+  color: var(--ivory);
+}
+
+.book-layout .player-main-controls {
+  width: 100%;
+  max-width: 1040px;
+  margin: 0 auto;
+  grid-template-columns: auto auto auto 44px;
+  grid-template-areas:
+    "readout transport transport transport"
+    "rule rule rule rule"
+    "voice speed nav reset";
+  justify-content: center;
+  gap: 8px 16px;
+}
+
+.book-layout .player-main-controls::before {
+  content: "";
+  grid-area: rule;
+  height: 1px;
+  background: var(--border);
+}
+
+/* Flatten layout-only wrappers so both rows share compact, content-sized tracks. */
+.book-layout :is(.player-action-row, .player-info-nav-row, .player-readout-row) {
+  display: contents;
+}
+
+.book-layout .player-action-row > .transport {
+  grid-area: transport;
+}
+
+.book-layout .player-action-row > .speed-control {
+  grid-area: speed;
+  justify-self: start;
+}
+
+.book-layout .player-action-row > .reset-button {
+  grid-area: reset;
+  justify-self: end;
+}
+
+.book-layout .player-info-nav-row > .text-nav {
+  grid-area: nav;
+}
+
+.book-layout .player-readout-row > .voice-model-selector {
+  grid-area: voice;
+  justify-self: start;
+}
+
+.book-layout .time-pill {
+  grid-area: readout;
+  gap: 10px;
+  border: 0;
+  background: transparent;
+}
+
+.book-layout .time-pill :is(span, strong) {
+  padding: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+}
+
+.book-layout .time-pill strong {
+  color: var(--gold);
+}
+
+.book-layout .transport {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 8px;
+}
+
+.book-layout :is(.transport button, .reset-button, .speed-control, .text-nav, .voice-model-button) {
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  box-shadow: none;
+}
+
+.book-layout :is(.player-dock, .focus-control-dock) button {
+  transition: background-color 140ms ease, color 140ms ease;
+}
+
+.book-layout :is(.player-dock, .focus-control-dock) button svg {
+  stroke-width: 1.75;
+}
+
+.book-layout .transport button {
+  min-width: 44px;
+  padding: 0 8px;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+/* The icon-only play control has an explicit accessible name. */
+.book-layout .transport .play-button {
+  width: 58px;
+  height: 58px;
+  min-width: 58px;
+  flex: 0 0 58px;
+  gap: 0;
+  padding: 0;
+  border-radius: 50%;
+  background: var(--gold);
+  color: var(--black);
+  font-size: 0;
+}
+
+.book-layout .transport .play-button svg {
+  width: 25px;
+  height: 25px;
+}
+
+.book-layout .speed-control {
+  width: max-content;
+  max-width: 100%;
+  gap: 2px;
+  padding: 0;
+  background: #ffffff06;
+}
+
+.book-layout .speed-control button {
+  flex: 0 0 auto;
+  width: auto;
+  min-width: 44px;
+  padding: 0 4px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.book-layout :is(.speed-control, .focus-speed) button:is(.active, [aria-pressed="true"]) {
+  background: #c6a75e24;
+  box-shadow: none;
+  color: var(--gold);
+  font-weight: 600;
+}
+
+.book-layout .reset-button {
+  width: 44px;
+  min-width: 44px;
+  padding: 0;
+}
+
+.book-layout .reset-button span {
+  display: none;
+}
+
+.book-layout .text-nav {
+  gap: 2px;
+  padding: 0;
+}
+
+.book-layout .text-nav button {
+  min-width: 44px;
+  padding: 0 8px;
+  border-radius: 4px;
+  background: transparent;
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.book-layout .voice-model-button {
+  width: auto;
+  max-width: 200px;
+  padding: 0 8px;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.book-layout .voice-model-button span {
+  display: inline;
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.book-layout .player-dock .voice-model-selector {
+  position: static;
+}
+
+.book-layout .player-dock .voice-model-menu {
+  left: max(12px, env(safe-area-inset-left, 0px));
+  bottom: calc(100% + 8px);
+  width: min(300px, calc(100vw - 24px));
+  max-height: max(44px, calc(100dvh - var(--player-dock-height, 176px) - 36px));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  transform: none;
+  background: var(--book-chrome);
+}
+
+.book-layout .progress-strip {
+  right: 0;
+  left: 0;
+  height: 3px;
+  border-radius: 0;
+}
+
+.book-layout :is(.transport, .speed-control) button:hover:not(:disabled),
+.book-layout :is(.reset-button, .voice-model-button):hover:not(:disabled) {
+  background: #c6a75e21;
+}
+
+.book-layout .transport .play-button:hover:not(:disabled) {
+  background: #d7bd78;
+}
+
+.book-layout .mobile-player-slot,
+.book-layout .mobile-modes-slot {
+  display: none;
+}
+
+/* Focus keeps its existing tap-to-hide lifecycle and independent height observer. */
+.reader-shell.book-layout.mode-focus {
+  width: 100%;
+  height: 100dvh;
+  min-height: 0;
+  padding: 0;
+}
+
+.book-layout.mode-focus :is(.reader-topbar, .library-panel, .import-panel, .player-dock, .book-toolbar) {
+  display: none;
+}
+
+.book-layout.mode-focus .workspace-grid {
+  display: block;
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  padding: 0;
+}
+
+.book-layout.mode-focus :is(.reader-center, .reader-stage, .reader-document) {
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.book-layout.mode-focus .document-text {
+  height: 100%;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 20px 24px calc(var(--focus-dock-height, 260px) + 24px);
+  scroll-padding-block: 24px calc(var(--focus-dock-height, 260px) + 24px);
+  font-size: 20px;
+}
+
+.book-layout.mode-focus .book-spread {
+  width: 100%;
+  min-height: calc(100dvh - 48px);
+}
+
+.book-layout .focus-control-dock {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: center;
+  gap: 8px;
+  left: max(12px, env(safe-area-inset-left, 0px));
+  right: max(12px, env(safe-area-inset-right, 0px));
+  bottom: max(12px, env(safe-area-inset-bottom, 0px));
+  width: auto;
+  max-width: 1600px;
+  margin-inline: auto;
+  transform: none;
+  background: var(--book-chrome);
+}
+
+.book-layout .focus-control-dock > * {
+  grid-area: auto;
+  min-width: 0;
+}
+
+.book-layout .focus-control-dock button {
+  border-radius: 4px;
+}
+
+.book-layout .focus-voice-selector .voice-model-button {
+  width: 44px;
+  padding: 0;
+}
+
+.book-layout .focus-voice-selector .voice-model-button span {
+  display: none;
+}
+
+.book-layout .focus-control-dock .focus-text-nav {
+  width: auto;
+  max-width: 100%;
+}
+
+.book-layout .focus-control-dock .focus-speed {
+  width: auto;
+  max-width: 100%;
+}
+
+@media (min-width: 1450px) {
+  .book-layout .workspace-grid {
+    max-width: 1400px;
+    padding-top: 28px;
+  }
+
+  .book-layout .book-page {
+    padding: 36px 50px 30px;
+  }
+
+  .book-layout .document-text {
+    font-size: 20px;
+    line-height: 1.75;
+  }
+}
+
+@media (max-width: 1100px) {
+  .book-layout .reader-topbar {
+    gap: 8px 12px;
+    padding-inline: 22px;
+  }
+
+  .book-layout .workspace-grid {
+    padding-inline: 24px;
+  }
+
+  .book-layout .book-page {
+    padding-inline: 30px;
+  }
+
+  .book-layout .player-main-controls {
+    column-gap: 10px;
+  }
+
+  .book-layout .text-nav button {
+    padding-inline: 5px;
+  }
+}
+
+@media (max-width: 899px) {
+  .book-layout .book-spread {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  /* ReaderApp must also advance one page below 900px, not one spread. */
+  .book-layout .book-page:nth-child(n + 2),
+  .book-layout .book-page-blank {
+    display: none;
+  }
+
+  .book-layout .book-page {
+    box-shadow: none;
+  }
+
+  .book-layout .reader-topbar {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .book-layout .app-brand {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .book-layout .source-navigation {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    margin: 0;
+  }
+
+  .book-layout .reader-topbar > .book-page-controls {
+    grid-column: 1 / -1;
+    grid-row: 3;
+    justify-self: center;
+  }
+
+  .book-layout .book-mode-controls {
+    grid-column: 2;
+    grid-row: 1;
+    border: 0;
+    padding: 0;
+  }
+
+  .book-layout .player-main-controls {
+    grid-template-columns: minmax(0, 1fr) auto auto 44px;
+  }
+
+  .book-layout .time-pill {
+    min-width: 0;
+    flex-wrap: wrap;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
+  .book-layout .text-nav button span {
+    display: none;
+  }
+
+  .book-layout .focus-control-dock .focus-transport {
+    display: flex;
+    width: auto;
+    gap: 4px;
+  }
+
+  .book-layout .focus-control-dock .focus-text-nav button {
+    flex: 1 1 44px;
+  }
+
+  .book-layout .focus-text-nav button span {
+    display: none;
+  }
+
+  .book-layout .focus-control-dock .focus-play-button {
+    min-width: 48px;
+    width: 48px;
+    height: 48px;
+    padding: 0;
+    gap: 0;
+    border-radius: 50%;
+    font-size: 0;
+  }
+}
+
+@media (max-width: 599px) {
+  .book-layout .reader-topbar {
+    padding: 10px 12px 6px;
+  }
+
+  .book-layout .source-navigation {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 2px;
+  }
+
+  .book-layout .source-navigation .home-action {
+    gap: 5px;
+    min-width: 0;
+    padding-inline: 4px;
+    font-size: 12px;
+    line-height: 1.3;
+    overflow-wrap: anywhere;
+  }
+
+  .book-layout .workspace-grid {
+    padding: 12px 12px 24px;
+  }
+
+  .book-layout.has-document:not(.mode-focus) .workspace-grid {
+    padding-bottom: var(--player-dock-height, 252px);
+  }
+
+  .book-layout .book-page-controls {
+    margin: 0 auto;
+  }
+
+  .book-layout .book-page {
+    padding: 23px 22px 20px;
+  }
+
+  .book-layout .book-page-heading {
+    margin-bottom: 20px;
+    font-size: 9px;
+  }
+
+  .book-layout .document-text {
+    font-size: 17px;
+    line-height: 1.65;
+  }
+
+  .book-layout .text-block-heading {
+    font-size: 27px;
+  }
+
+  .book-layout .text-block-subheading {
+    font-size: 23px;
+  }
+
+  .book-layout .import-panel {
+    padding: 48px 0 16px;
+  }
+
+  .book-layout:not(.mode-focus) .player-dock.desktop-player {
+    inset: auto max(6px, env(safe-area-inset-right, 0px)) max(6px, env(safe-area-inset-bottom, 0px)) max(6px, env(safe-area-inset-left, 0px));
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px;
+  }
+
+  .book-layout .player-main-controls {
+    grid-template-columns: minmax(0, 1fr) 96px 44px;
+    grid-template-areas:
+      "transport transport transport"
+      "speed speed reset"
+      "rule rule rule"
+      "readout voice voice"
+      "nav nav nav";
+    gap: 4px;
+  }
+
+  .book-layout .player-readout-row > .voice-model-selector {
+    justify-self: end;
+  }
+
+  .book-layout .transport {
+    gap: 3px;
+  }
+
+  .book-layout .transport button {
+    padding-inline: 4px;
+    gap: 2px;
+    font-size: 11px;
+  }
+
+  .book-layout .transport .play-button {
+    width: 52px;
+    min-width: 52px;
+    height: 52px;
+    flex-basis: 52px;
+    font-size: 0;
+  }
+
+  .book-layout .time-pill {
+    min-width: 0;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+    gap: 4px 8px;
+    white-space: normal;
+  }
+
+  .book-layout .time-pill :is(span, strong) {
+    font-size: 11px;
+  }
+
+  .book-layout .voice-model-selector {
+    flex: 0 1 auto;
+    min-width: 0;
+  }
+
+  .book-layout .voice-model-button {
+    max-width: 108px;
+    padding-inline: 4px;
+  }
+
+  .book-layout .text-nav {
+    width: 100%;
+  }
+
+  .book-layout.mode-focus .workspace-grid {
+    padding: 0;
+  }
+
+  .book-layout.mode-focus .document-text {
+    padding: 12px 10px calc(var(--focus-dock-height, 260px) + 20px);
+    font-size: 18px;
+  }
+
+  .book-layout.mode-focus .book-page {
+    padding-inline: 20px;
+  }
+
+  .book-layout .focus-control-dock {
+    gap: 4px;
+    padding: 8px;
+  }
+
+  .book-layout .focus-control-dock .focus-readout-row {
+    flex: 1 1 100%;
+    justify-content: space-between;
+  }
+
+  .book-layout .focus-control-dock .focus-readout {
+    flex-wrap: wrap;
+  }
+
+  .book-layout .focus-control-dock .focus-transport {
+    order: -1;
+    flex: 1 1 100%;
+  }
+
+  .book-layout .focus-control-dock .focus-transport button {
+    min-width: 44px;
+    padding-inline: 3px;
+    font-size: 11px;
+  }
+
+  .book-layout .focus-control-dock .focus-play-button {
+    font-size: 0;
+  }
+
+  .book-layout .focus-control-dock .focus-text-nav {
+    flex: 1 1 100%;
+  }
+
+  .book-layout .focus-control-dock .focus-speed {
+    flex: 1 1 100%;
+    justify-content: center;
+  }
+
+  .book-layout .focus-control-dock .focus-speed button {
+    min-width: 44px;
+    flex: 1;
+  }
+
+  .book-layout .focus-control-dock :is(.focus-theme-toggle, .focus-exit-action) {
+    flex: 1 1 44px;
+  }
+}
+
+/* Equal touch targets keep transport controls separated in both reader modes. */
+@media (max-width: 899px) {
+  .book-layout .transport,
+  .book-layout .focus-control-dock .focus-transport {
+    display: grid;
+    grid-template-columns: minmax(44px, 1fr) minmax(44px, 1fr) 60px minmax(44px, 1fr) minmax(44px, 1fr);
+    align-items: center;
+    justify-items: center;
+    gap: 8px;
+    width: 100%;
+    max-width: 380px;
+    margin-inline: auto;
+    justify-self: center;
+  }
+
+  .book-layout .transport button,
+  .book-layout .focus-control-dock .focus-transport button {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    width: 100%;
+    min-width: 44px;
+    height: 52px;
+    min-height: 52px;
+    padding: 4px;
+    gap: 4px;
+    font-size: 12px;
+    line-height: 1;
+    white-space: nowrap;
+  }
+
+  .book-layout .transport .play-button,
+  .book-layout .focus-control-dock .focus-transport .focus-play-button {
+    width: 60px;
+    min-width: 60px;
+    height: 60px;
+    padding: 0;
+    border-radius: 50%;
+  }
+
+  .book-layout .transport .play-button svg,
+  .book-layout .focus-control-dock .focus-play-button svg {
+    width: 26px;
+    height: 26px;
+    flex-shrink: 0;
+  }
+}
+
+/* A short landscape viewport still leaves document space above the controls. */
+@media (orientation: landscape) and (max-height: 560px) and (min-width: 600px) {
+  .book-layout .player-main-controls {
+    column-gap: 8px;
+  }
+
+  .book-layout .focus-control-dock .focus-text-nav,
+  .book-layout .focus-control-dock .focus-speed {
+    display: flex;
+    flex-wrap: nowrap;
+  }
+}
+
+.book-layout [hidden] {
+  display: none !important; /* The HTML hidden state must beat component display rules. */
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .book-layout,
+  .book-layout * {
+    scroll-behavior: auto;
+    transition: none;
+    animation: none;
+  }
+}

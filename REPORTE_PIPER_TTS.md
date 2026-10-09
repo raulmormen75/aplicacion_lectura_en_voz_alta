@@ -1,5 +1,63 @@
 # REPORTE_PIPER_TTS
 
+## Integración vigente de Laura: 9 de octubre de 2026
+
+Alcance: integración para uso personal, local y no comercial. No se publica ni se despliega como parte de este cambio. Por instrucción posterior del usuario, el modelo se sirve desde el propio proyecto: `/models/laura/es_MX-laura-high.onnx` y su `.json`. La descarga de esos dos archivos fue realizada por el trabajo principal, no por este cambio del motor. Alojar el archivo en el proyecto no elimina la inicialización ni el costo de inferencia.
+
+### Motor y garantías
+
+- `synthesizePiperSpeech` conserva su API, su timeout predeterminado de 90 segundos y `createPiperEngine` sin modificaciones. Se mantienen cola FIFO, singleflight, cancelación y descarte del audio tardío. Cancelar libera la interfaz y rechaza la solicitud; no interrumpe el cálculo nativo ya iniciado. La cola espera su terminación antes de generar otro fragmento.
+- Fonemización, descarga, validación e inferencia ONNX se ejecutan en un worker dedicado creado con `new Worker(new URL(..., import.meta.url))`. No se copian binarios de ONNX a `public/` ni se agregan dependencias. Un fallo fatal del worker invalida la sesión; el siguiente intento puede crear otra.
+- Se reutiliza el flujo probado en `output/playwright/voice-lab/lab.mjs`, funciones `preparePhonemizer`, `pcmWav` y controlador de generación: Piper/eSpeak, tensores int64, escalas de configuración, WASM/CPU y WAV mono PCM16. La implementación también libera los tensores y rechaza audio vacío o no finito.
+- `@realtimex/piper-tts-web` 1.1.1 no admite un modelo arbitrario en `TtsSessionOptions`: su implementación consulta `PATH_MAP[voiceId]` y un repositorio fijo. Localizador: `node_modules/@realtimex/piper-tts-web/dist/inference.d.ts`, interfaz completa `TtsSessionOptions`; `dist/piper-tts-web.js`, método `init`, líneas 284-307. **SOPORTE DIRECTO**, limitado a la versión instalada. No se utiliza un identificador de Claude para representar a Laura.
+- La caché `reader-piper-laura-v1` almacena únicamente el modelo y su configuración mediante URL exacta. Se valida el modelo, incluso recuperado de caché, con SHA-256 `c1415da8e5409734e9be7623d34914461674eb1efc83873d5e6332cb61ed1068`. No se consulta OPFS ni la caché anterior de Claude. Los fallos de apertura, consulta o escritura no son fatales; los bytes corruptos se reemplazan solo después de validar una descarga completa.
+- La persistencia depende del navegador, que puede desalojar la caché. El fonemizador y los recursos de ejecución siguen en CDN con versiones explícitas; esta integración no promete inicio completamente sin conexión. Los textos se envían únicamente al worker local, no a una API de síntesis. La caché persistente del motor no guarda texto ni audio.
+- El respaldo Browser permanece en `ReaderApp.tsx`, fuera del alcance de estas ediciones. Los errores del motor se propagan al flujo existente, sin sustitución silenciosa de Laura por Claude. La interfaz, preferencias, estilos y paquetes son responsabilidad del trabajo principal.
+
+### Evidencia y licencia
+
+Fuentes consultadas el 9 de octubre de 2026. Se revisó el README original completo, incluido el contexto de todos los permisos, restricciones, propiedad intelectual, incumplimiento y contacto; también el texto íntegro del código legal CC BY-NC 4.0. Esta revisión documental no es un dictamen jurídico.
+
+| Afirmación | Fuente y localizador | Contexto, clasificación y límites |
+| --- | --- | --- |
+| El repositorio identifica a HirCoir como publicador de Laura y declara `cc-by-nc-4.0`. | [README original](https://huggingface.co/HirCoir/Piper-TTS-Laura/blob/main/README.md), metadatos `license` y sección «Licencia de uso para el modelo de voz». | **SOPORTE DIRECTO** de lo declarado. No acredita por sí solo titularidad de todos los derechos, origen de los datos o consentimiento de la voz. |
+| El texto propio hace opcional el crédito y prohíbe servicios de pago o usos comerciales que cobren a usuarios finales. | Mismo README, «Permisos», «Restricciones», «Propiedad intelectual», «Incumplimiento» y «Contacto». | **SOPORTE DIRECTO**. Se conserva crédito a HirCoir, enlace al modelo y aviso de licencia. No se interpreta la ausencia de cobro como autorización general de uso comercial. |
+| CC BY-NC define NoComercial más ampliamente que la ausencia de cobro al usuario y exige atribución cuando se comparte material licenciado. | [Código legal completo CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/legalcode.es), secciones 1(i), 2(a)(1), 3(a), 5 y 6. | **SOPORTE DIRECTO**. Contempla ventaja comercial o compensación monetaria, atribución al compartir, ausencia de garantías y terminación por incumplimiento. No resuelve qué términos pretende aplicar el publicador ante las divergencias del README. |
+| El ONNX original pesa aproximadamente 63.1 MB y tiene el hash usado por el motor. | [Archivo original](https://huggingface.co/HirCoir/Piper-TTS-Laura/blob/main/es_MX-laura-high.onnx), «Xet Pointer Details», campos de tamaño y SHA256. | **SOPORTE DIRECTO**. El archivo local de 63,122,309 bytes fue contrastado con ese hash. No es una medición de velocidad. |
+| La configuración utiliza `es-419`, 22050 Hz y escalas 0.667, 1 y 0.8. | [Configuración original completa](https://huggingface.co/HirCoir/Piper-TTS-Laura/blob/main/es_MX-laura-high.onnx.json), objetos `audio`, `espeak`, `language` e `inference`. | **SOPORTE DIRECTO**. El nombre `es_MX` del archivo no demuestra edad, género, procedencia del hablante ni calidad percibida. |
+
+**Delimitación:** las formulaciones del README y de CC BY-NC no son equivalentes. La autorización para publicación, redistribución o explotación comercial de esta integración queda **NO CONFIRMADA**; debe aclararse con HirCoir antes de ampliar el uso. Guardar el modelo en este repositorio local no autoriza subirlo a un repositorio público ni desplegarlo. Las licencias del código y del fonemizador deben revisarse por separado antes de distribuir; no se trasladan automáticamente desde el modelo.
+
+### Comprobación de esta integración
+
+- Pruebas enfocadas: `tests/laura.test.mjs`, `tests/laura-worker.test.mjs`, más las existentes `tests/piper-engine.test.mjs` y `tests/piper-timing.test.mjs`: 29 PASS.
+- TypeScript sin emisión y lint enfocado del motor, helpers y pruebas: PASS con modelo local y worker. Verificación de diferencias sin errores de espacios: PASS.
+- Prueba real reproducible: `tests/laura-browser.test.mjs`, activada con `LAURA_APP_URL=http://127.0.0.1:3016` y `LAURA_BROWSER_CHANNEL=msedge`. Usa Edge real y el motor de la aplicación, sin sustituir el modelo ni el runtime por simulaciones.
+- Worker con origen remoto, comprobado antes del ajuste local: 136 palabras, audio de 37.99 y 37.71 segundos, PCM16 de 22050 Hz y señal no nula; recarga sin solicitar nuevamente el modelo y respaldo Browser a 390×844. Durante generación se observaron 663 y 705 eventos del temporizador de interfaz, con intervalos máximos de 29 y 60.6 ms. Son resultados de este equipo, no garantías para otros dispositivos.
+- Ejecución final en Next con modelo servido desde `/models/laura/`: **PASS**. Primer fragmento de la aplicación: 9.706 segundos de audio en frío y 9.671 segundos tras recargar con la ruta del modelo bloqueada; 22050 Hz y señal no nula. La prueba comprobó las dos entradas locales de caché, un worker inicial y ausencia de solicitudes a Claude. No usa modelos o runtime simulados.
+- Interfaz durante esa ejecución: 126 y 196 eventos de temporizador durante la generación; intervalos máximos de 46.6 y 52 ms. El botón Cancelar respondió en 48.4 ms, sin iniciar reproducción del resultado cancelado. La operación nativa continúa en el worker y conserva el bloqueo singleflight hasta terminar. Son observaciones de este equipo, no objetivos garantizados de latencia.
+- Respaldo Browser: **PASS** al impedir acceso al modelo en un contexto limpio a 390×844. Se verificó la activación del respaldo, no la disponibilidad o calidad de voces del sistema. Resultado final: 29 pruebas enfocadas y 1 integración real aprobadas; esta última se omite por defecto si no se proporciona `LAURA_APP_URL`.
+- Errores y recursos: pruebas de error nativo, fallo de inicialización, caída del worker, error de mensajes, cancelación y timeout aprobadas. Los tensores de entrada y salida se liberan tanto en éxito como en error; los workers fallidos se terminan. Se conserva una sesión nativa caliente y la caché de audio acotada del motor. No se realizó un perfil prolongado de memoria ni se garantiza consumo constante entre navegadores.
+- Android/iOS físicos, valoración del timbre por el usuario, arranque totalmente offline y compilación de producción: **NO CONFIRMADOS** en esta intervención. No se modifica ni se regenera el precache del service worker; las pruebas de integración aíslan ese componente.
+
+Archivos de esta intervención: `src/lib/reader/piper.ts`, `src/lib/reader/laura.ts`, `src/lib/reader/laura-worker-client.ts`, `src/lib/reader/laura-worker.ts`, `tests/laura.test.mjs`, `tests/laura-worker.test.mjs`, `tests/laura-browser.test.mjs` y este reporte. Los cambios concurrentes del trabajo principal no forman parte de esta lista.
+
+### Validación posterior de la aplicación integrada
+
+Comprobación del agente principal el 9 de octubre de 2026, en `http://127.0.0.1:3016/`:
+
+- El primer documento de prueba repetía párrafos para alargarlo. Se sustituyó por un relato continuo de 617 palabras. No se aplicó una eliminación automática de párrafos repetidos a los documentos del usuario.
+- Se recorrieron las cinco páginas, tanto a doble hoja en escritorio como a una hoja en móvil. Los 617 índices de palabra aparecen exactamente una vez y en orden. El texto completo reconstruido desde los bloques visibles coincide con la entrada, incluida su puntuación, al normalizar los espacios entre párrafos.
+- Capturas reales: `output/playwright/en-voz-desktop.jpg` y `output/playwright/en-voz-mobile.jpg`. No se encontró desbordamiento horizontal. Se retiró la franja permanente de estado; los errores de importación siguen mostrándose cuando ocurren.
+- Se comprobó el selector de voz y la velocidad 0.65 en pantalla completa. Laura inició con el modelo local y la ventana de preparación se cerró al empezar el audio. El primer fragmento de esta ejecución pasó de inicio a audio generado en aproximadamente 3.3 segundos, con recursos ya disponibles. No es una medición en frío ni una garantía para móviles físicos.
+- Los fragmentos iniciales de Laura se limitan a 40 palabras y se prepara el siguiente mientras se reproduce el actual. El motor del navegador sigue disponible. El resaltado de Piper continúa siendo estimado, no alineación exacta por palabra.
+- Lint aprobado; 183 pruebas aprobadas, ninguna fallida y una integración opcional omitida por defecto. La compilación de producción, pendiente en la revisión del motor anterior, quedó aprobada. El primer intento no pudo descargar las fuentes por la restricción de red del entorno; se repitió con acceso autorizado y terminó correctamente.
+- Los cambios permanecen locales. No se ha realizado commit, push ni despliegue en esta intervención. Android/iOS físicos y el inicio totalmente sin conexión siguen pendientes.
+
+## Historial anterior a Laura
+
+Los apartados siguientes documentan la integración previa de Claude y sus revisiones. No describen la configuración vigente ni trasladan su licencia a Laura.
+
 ## 1. Diagnostico del proyecto
 
 - Tipo de proyecto: PWA con Next.js 16 App Router, React 19 y TypeScript.

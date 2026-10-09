@@ -140,6 +140,18 @@ test("empty storage loads fresh independent defaults", async () => {
   assert.equal(h.local.size, 0);
 });
 
+test("0.65 playback speed and selected voice survive save and reload", async () => {
+  const h = harness();
+  const saved = state(h);
+  saved.preferences.rate = 0.65;
+  saved.preferences.voiceId = "browser-standard";
+  assert.equal((await h.api.saveReaderState(saved)).ok, true);
+  const loaded = await h.api.loadReaderState();
+  assert.equal(loaded.ok, true);
+  assert.equal(loaded.state.preferences.rate, 0.65);
+  assert.equal(loaded.state.preferences.voiceId, "browser-standard");
+});
+
 test("v1 migrates document before checkpoint and remains byte-for-byte intact", async () => {
   const h = harness();
   const legacy = JSON.stringify(state(h));
