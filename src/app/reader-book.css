@@ -52,6 +52,7 @@
   flex-direction: row;
   flex-wrap: wrap;
   align-items: center;
+  justify-content: flex-start;
   gap: 12px 24px;
   width: 100%;
   max-width: none;
@@ -90,16 +91,18 @@
 
 .book-layout .source-navigation {
   display: flex;
+  flex: 1 1 auto;
   flex-wrap: wrap;
   align-items: center;
   justify-content: center;
   gap: 4px;
   min-width: 0;
-  margin-left: auto;
+  margin: 0;
 }
 
 .book-layout .source-navigation .home-action {
   display: inline-flex;
+  flex: 1 1 auto;
   flex-direction: row;
   justify-content: center;
   gap: 8px;
