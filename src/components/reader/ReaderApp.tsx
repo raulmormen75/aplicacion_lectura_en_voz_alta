@@ -40,6 +40,7 @@ import {
   saveReaderState,
 } from "@/lib/reader/storage";
 import { deviceVoiceKey, deviceVoiceLabel, preferredSpanishVoice, spanishDeviceVoices } from "@/lib/reader/device-voices";
+import { discoverSpanishDeviceVoices, readDeviceVoices } from "@/lib/reader/device-voice-discovery";
 import { paginateBook, pageForWord } from "@/lib/reader/book";
 import type {
   PlaybackRate,
@@ -77,7 +78,6 @@ const SAMPLE_TEXT =
   "La lectura científica exige atención, ritmo y continuidad. Esta aplicación convierte documentos largos en una experiencia auditiva clara, con avance guardado, resaltado visual y controles diseñados para retomar el contenido sin perder el hilo.";
 const MAX_CLIENT_UPLOAD_BYTES = 25 * 1024 * 1024;
 const MAX_CLIENT_TEXT_CHARS = 300_000;
-const VOICE_LOAD_TIMEOUT_MS = 900;
 const STANDARD_VOICE_MODEL_ID = "browser-standard" as const;
 const PLAYBACK_RATES: PlaybackRate[] = [0.5, 0.65, 0.75, 0.85, 1, 1.25, 1.5, 2];
 
@@ -95,6 +95,9 @@ export function ReaderApp() {
   const [statusMessage, setStatusMessage] = useState("Listo para leer.");
   const [importError, setImportError] = useState<string | null>(null);
   const [systemVoices, setSystemVoices] = useState<SpeechSynthesisVoice[]>([]);
+  const [isVoiceDiscoveryPending, setIsVoiceDiscoveryPending] = useState(false);
+  const [isAndroidClient, setIsAndroidClient] = useState(false);
+  const [isVoiceHelpOpen, setIsVoiceHelpOpen] = useState(false);
   const [playbackError, setPlaybackError] = useState("");
   const [isVoiceMenuOpen, setIsVoiceMenuOpen] = useState(false);
   const [integrations, setIntegrations] = useState<IntegrationsStatus>({
@@ -120,6 +123,8 @@ export function ReaderApp() {
   const shouldContinuePlaybackRef = useRef(false);
   const progressWordRef = useRef(0);
   const boundarySeenRef = useRef(false);
+  const voiceDiscoveryAbortRef = useRef<AbortController | null>(null);
+  const speechVoiceWaitAbortRef = useRef<AbortController | null>(null);
 
   const document = state.document;
   const hasDocument = Boolean(document);
@@ -139,13 +144,30 @@ export function ReaderApp() {
   }, []);
 
   const refreshSystemVoices = useCallback(() => {
-    const voices = window.speechSynthesis?.getVoices?.() ?? [];
-    setSystemVoices([...voices]);
+    setSystemVoices(readDeviceVoices(window.speechSynthesis));
+  }, []);
+
+  const beginVoiceDiscovery = useCallback(() => {
+    voiceDiscoveryAbortRef.current?.abort();
+    const controller = new AbortController();
+    voiceDiscoveryAbortRef.current = controller;
+    setIsVoiceDiscoveryPending(true);
+    void discoverSpanishDeviceVoices(window.speechSynthesis, {
+      signal: controller.signal,
+      onUpdate: setSystemVoices,
+      keepWatching: true,
+    }).then(() => {
+      if (voiceDiscoveryAbortRef.current !== controller) return;
+      voiceDiscoveryAbortRef.current = null;
+      setIsVoiceDiscoveryPending(false);
+    });
   }, []);
 
   const stopPlayback = useCallback((advanceSession = true) => {
     shouldContinuePlaybackRef.current = false;
     if (advanceSession) playbackSessionRef.current += 1;
+    speechVoiceWaitAbortRef.current?.abort();
+    speechVoiceWaitAbortRef.current = null;
     window.speechSynthesis?.cancel();
     clearProgressTimer();
     activeSegmentRef.current = null;
@@ -205,7 +227,8 @@ export function ReaderApp() {
     let mounted = true;
     void loadReaderState().then((result) => {
       if (!mounted) return;
-      refreshSystemVoices();
+      setIsAndroidClient(/Android/i.test(navigator.userAgent));
+      beginVoiceDiscovery();
       const restored = result.state;
       restored.preferences.voiceId = STANDARD_VOICE_MODEL_ID;
       restored.preferences.language = "es";
@@ -220,9 +243,9 @@ export function ReaderApp() {
     if ("caches" in window) void caches.delete("reader-piper-laura-v1").catch(() => undefined);
 
     window.speechSynthesis?.addEventListener?.("voiceschanged", refreshSystemVoices);
-    window.addEventListener("focus", refreshSystemVoices);
+    window.addEventListener("focus", beginVoiceDiscovery);
     const refreshWhenVisible = () => {
-      if (globalThis.document.visibilityState === "visible") refreshSystemVoices();
+      if (globalThis.document.visibilityState === "visible") beginVoiceDiscovery();
     };
     globalThis.document.addEventListener("visibilitychange", refreshWhenVisible);
 
@@ -237,24 +260,19 @@ export function ReaderApp() {
 
     return () => {
       window.speechSynthesis?.removeEventListener?.("voiceschanged", refreshSystemVoices);
-      window.removeEventListener("focus", refreshSystemVoices);
+      window.removeEventListener("focus", beginVoiceDiscovery);
       globalThis.document.removeEventListener("visibilitychange", refreshWhenVisible);
       mounted = false;
+      voiceDiscoveryAbortRef.current?.abort();
+      voiceDiscoveryAbortRef.current = null;
       processingAbortRef.current?.abort();
       stopPlayback();
     };
-  }, [refreshSystemVoices, stopPlayback]);
+  }, [beginVoiceDiscovery, refreshSystemVoices, stopPlayback]);
 
   useEffect(() => {
     selectedVoiceURIRef.current = preferences.systemVoiceURI;
   }, [preferences.systemVoiceURI]);
-
-  useEffect(() => {
-    if (!isVoiceMenuOpen) return;
-    // Some browsers expose their voice catalog after opening the page, without an event.
-    const retries = [250, 750, 1500].map(delay => window.setTimeout(refreshSystemVoices, delay));
-    return () => retries.forEach(timer => window.clearTimeout(timer));
-  }, [isVoiceMenuOpen, refreshSystemVoices]);
 
   useEffect(() => {
     const query = window.matchMedia("(min-width: 900px)");
@@ -649,32 +667,15 @@ export function ReaderApp() {
   }
 
   async function waitForSpeechVoices() {
-    const initialVoices = window.speechSynthesis.getVoices();
-    if (spanishDeviceVoices(initialVoices).length > 0) {
-      setSystemVoices([...initialVoices]);
-      return initialVoices;
-    }
-
-    return new Promise<SpeechSynthesisVoice[]>((resolve) => {
-      let settled = false;
-      const finish = (voices: SpeechSynthesisVoice[]) => {
-        if (settled) return;
-        settled = true;
-        window.clearTimeout(timeoutId);
-        window.speechSynthesis?.removeEventListener?.("voiceschanged", handleVoicesChanged);
-        setSystemVoices([...voices]);
-        resolve(voices);
-      };
-      const handleVoicesChanged = () => {
-        const voices = window.speechSynthesis.getVoices();
-        if (spanishDeviceVoices(voices).length > 0) finish(voices);
-      };
-      const timeoutId = window.setTimeout(() => {
-        finish(window.speechSynthesis.getVoices());
-      }, VOICE_LOAD_TIMEOUT_MS);
-
-      window.speechSynthesis?.addEventListener?.("voiceschanged", handleVoicesChanged);
+    speechVoiceWaitAbortRef.current?.abort();
+    const controller = new AbortController();
+    speechVoiceWaitAbortRef.current = controller;
+    const voices = await discoverSpanishDeviceVoices(window.speechSynthesis, {
+      signal: controller.signal,
+      onUpdate: setSystemVoices,
     });
+    if (speechVoiceWaitAbortRef.current === controller) speechVoiceWaitAbortRef.current = null;
+    return voices;
   }
 
   function getSpeechWindow(fromWord: number) {
@@ -727,6 +728,7 @@ export function ReaderApp() {
     playbackSessionRef.current = activeSession;
     shouldContinuePlaybackRef.current = true;
     if (sessionId === undefined) {
+      speechVoiceWaitAbortRef.current?.abort();
       window.speechSynthesis?.cancel();
       clearProgressTimer();
       utteranceRef.current = null;
@@ -746,7 +748,7 @@ export function ReaderApp() {
     }
     updateProgress(fromWord);
     setPlaybackError("");
-    if (!("speechSynthesis" in window) || !("SpeechSynthesisUtterance" in window)) {
+    if (!window.speechSynthesis || typeof window.SpeechSynthesisUtterance !== "function") {
       setIsPlaying(false);
       shouldContinuePlaybackRef.current = false;
       setPlaybackError("Este navegador no ofrece voces del dispositivo.");
@@ -759,7 +761,7 @@ export function ReaderApp() {
     if (!preferredSystemVoice) {
       setIsPlaying(false);
       shouldContinuePlaybackRef.current = false;
-      setPlaybackError("No hay voces en español disponibles en este navegador.");
+      setPlaybackError("No se detectaron voces en español compartidas por este navegador. Abre Voces para actualizar o consultar la ayuda.");
       return;
     }
     startBrowserSpeech({ textToSpeak, speechBaseWord, chunkEndWord, activeSession, rate, preferredSystemVoice });
@@ -1196,7 +1198,10 @@ export function ReaderApp() {
           aria-expanded={isVoiceMenuOpen}
           aria-label={`Voz: ${activeLabel}. Cambiar voz`}
           title="Cambiar voz"
-          onClick={() => { refreshSystemVoices(); setIsVoiceMenuOpen(isOpen => !isOpen); }}
+          onClick={() => {
+            if (!isVoiceMenuOpen) { beginVoiceDiscovery(); setIsVoiceHelpOpen(false); }
+            setIsVoiceMenuOpen(isOpen => !isOpen);
+          }}
         >
           <Speech size={19} />
           <span>{activeLabel}</span>
@@ -1231,8 +1236,27 @@ export function ReaderApp() {
                 <span>{deviceVoiceLabel(voice)}</span>
               </button>
             ))}
-            {spanishVoices.length === 0 ? <p className="voice-menu-empty">No hay voces en español disponibles.</p> : null}
-            <button className="refresh-device-voices" type="button" role="menuitem" onClick={refreshSystemVoices}>
+            {spanishVoices.length === 0 ? (
+              <>
+                <p className="voice-menu-empty" role="status" aria-live="polite">
+                  {isVoiceDiscoveryPending ? "Buscando voces en español…" : "No se detectaron voces en español compartidas por este navegador."}
+                </p>
+                {isAndroidClient && !isVoiceDiscoveryPending ? (
+                  <>
+                    <button type="button" role="menuitem" aria-expanded={isVoiceHelpOpen} aria-controls={`android-voice-help-${variant}`} onClick={() => setIsVoiceHelpOpen(open => !open)}>
+                      Ayuda para Android
+                    </button>
+                    {isVoiceHelpOpen ? (
+                      <div id={`android-voice-help-${variant}`} className="voice-menu-help">
+                        <p>En Ajustes de Android, busca «Texto a voz», elige español e instala sus datos de voz. Regresa y toca Actualizar voces.</p>
+                        <p>Edge puede ofrecer Dalia en Leer en voz alta sin compartirla con esta página.</p>
+                      </div>
+                    ) : null}
+                  </>
+                ) : null}
+              </>
+            ) : null}
+            <button className="refresh-device-voices" type="button" role="menuitem" onClick={beginVoiceDiscovery}>
               <RotateCw size={16} aria-hidden="true" /><span>Actualizar voces</span>
             </button>
           </div>

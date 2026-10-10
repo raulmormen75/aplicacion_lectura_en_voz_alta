@@ -746,12 +746,20 @@
   color: var(--muted);
 }
 
-.book-layout .voice-menu-empty {
+.book-layout :is(.voice-menu-empty, .voice-menu-help) {
   margin: 0;
   padding: 10px;
   color: var(--muted);
   font-size: 13px;
   line-height: 1.5;
+}
+
+.book-layout .voice-menu-help p {
+  margin: 0;
+}
+
+.book-layout .voice-menu-help p + p {
+  margin-top: 8px;
 }
 
 .book-layout .progress-strip {

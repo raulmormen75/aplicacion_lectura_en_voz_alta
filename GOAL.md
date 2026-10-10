@@ -8,6 +8,7 @@ Las indicaciones del 9 de octubre de 2026 en México sustituyen la integración 
 
 - Mostrar en el botón inferior todas las voces en español que exponga el navegador, con México primero y sin explicaciones técnicas en el menú.
 - Actualizar la detección al abrir la aplicación, abrir el menú, volver a la pestaña y mediante Actualizar voces.
+- Recuperar catálogos tardíos sin eventos con consultas acotadas; mostrar búsqueda y ayuda breve opcional para Android sólo cuando falten voces en español. No garantizar voces del lector integrado de Edge que no aparezcan en su catálogo web.
 - No utilizar Hugging Face, Azure ni APIs de pago para reproducir documentos.
 - No descargar ni guardar modelos de voz en el navegador.
 - Quitar la ventana de ajustes, el selector de idioma, el interruptor temporal y sus avisos informativos.

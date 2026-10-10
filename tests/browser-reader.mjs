@@ -98,7 +98,7 @@ try {
     const voiceButton = page.getByRole("button", { name: /^Voz:/ });
     await voiceButton.click();
     assert.equal(await page.getByRole("menuitemradio").count(), 0);
-    assert.match(await page.getByRole("menu", { name: "Voces", exact: true }).innerText(), /No hay voces en español disponibles/);
+    assert.match(await page.getByRole("menu", { name: "Voces", exact: true }).innerText(), /Buscando voces en español/);
     // No voiceschanged event: opening the menu retries the actual browser catalog.
     await page.evaluate(voices => { window.__readerVoices = [...voices, { ...voices[0] }]; }, catalog);
     await page.waitForFunction(() => document.querySelectorAll("[role=menuitemradio]").length === 5);
@@ -203,15 +203,29 @@ try {
 
   // An English default must never be spoken when no Spanish voice is exposed.
   browser = await launchBrowser();
-  const unavailableContext = await browser.newContext({ viewport: { width: 390, height: 844 }, serviceWorkers: "block" });
+  const unavailableContext = await browser.newContext({
+    viewport: { width: 390, height: 844 }, serviceWorkers: "block",
+    userAgent: "Mozilla/5.0 (Linux; Android 16) AppleWebKit/537.36 Chrome/140.0.0.0 Mobile Safari/537.36 EdgA/140.0.0.0",
+  });
   await unavailableContext.addInitScript(fakeDeviceSpeech);
   const unavailable = await unavailableContext.newPage();
   await unavailable.goto(appUrl, { waitUntil: "networkidle" });
   await unavailable.evaluate(voices => { window.__readerVoices = voices; }, catalog.filter(voice => voice.lang === "en-GB"));
   await prepareText(unavailable);
   await unavailable.getByRole("button", { name: "Reproducir", exact: true }).click();
-  await unavailable.getByRole("alert").filter({ hasText: "No hay voces en español" }).waitFor();
+  await unavailable.getByRole("alert").filter({ hasText: "No se detectaron voces en español" }).waitFor();
   assert.equal(await unavailable.evaluate(() => window.__readerSpeech.starts), 0);
+  await unavailable.getByRole("button", { name: /^Voz:/ }).click();
+  await unavailable.getByRole("status").filter({ hasText: "No se detectaron voces" }).waitFor();
+  await unavailable.getByRole("menuitem", { name: "Ayuda para Android", exact: true }).click();
+  const help = unavailable.locator(".voice-menu-help");
+  assert.match(await help.innerText(), /Texto a voz/);
+  assert.match(await help.innerText(), /Dalia.*sin compartirla con esta página/);
+  assert.equal(await unavailable.getByRole("menuitemradio", { name: "Dalia", exact: true }).count(), 0);
+  const emptyMenu = await unavailable.getByRole("menu", { name: "Voces", exact: true }).boundingBox();
+  assert.ok(emptyMenu.x >= 0 && emptyMenu.x + emptyMenu.width <= 391);
+  await unavailable.screenshot({ path: resolve(root, "output/playwright/android-voice-help.png"), fullPage: true });
+  await unavailable.keyboard.press("Escape");
   await unavailable.getByRole("button", { name: "Cerrar aviso de audio", exact: true }).click();
   await unavailable.getByRole("button", { name: "Reproducir", exact: true }).click();
   await unavailable.getByRole("button", { name: "Pausar", exact: true }).click();
@@ -220,6 +234,50 @@ try {
   assert.equal(await unavailable.evaluate(() => window.__readerSpeech.starts), 0);
   console.log(JSON.stringify({ unavailableSpanish: "PASS", checks: "no English fallback; cancelling a pending catalog lookup prevents stale playback" }));
   await unavailableContext.close();
+
+  // Android-style delayed initialization, without a voiceschanged event. The
+  // old 900 ms playback / 1500 ms menu lookups miss both of these catalogs.
+  const delayedContext = await browser.newContext({ viewport: { width: 390, height: 844 }, serviceWorkers: "block" });
+  await delayedContext.addInitScript(fakeDeviceSpeech);
+  const delayed = await delayedContext.newPage();
+  await delayed.goto(appUrl, { waitUntil: "networkidle" });
+  await prepareText(delayed);
+  await delayed.evaluate(voice => {
+    window.__readerVoices = [{ name: "Microsoft Helena", lang: "es-ES", voiceURI: "test-es", default: false, localService: true }];
+    window.setTimeout(() => { window.__readerVoices.push(voice); }, 2000);
+  }, dalia);
+  await delayed.getByRole("button", { name: /^Voz:/ }).click();
+  await delayed.getByRole("menuitemradio", { name: "Dalia", exact: true }).waitFor();
+  assert.equal(await delayed.evaluate(() => window.__readerSpeech.starts), 0, "Catalog discovery must never synthesize silent/test audio.");
+  await delayed.keyboard.press("Escape");
+  await delayed.evaluate(voice => {
+    window.__readerVoices = [];
+    window.setTimeout(() => { window.__readerVoices = [voice]; }, 1700);
+  }, dalia);
+  await delayed.getByRole("button", { name: "Reproducir", exact: true }).click();
+  await delayed.getByRole("button", { name: /^Voz:/ }).click();
+  await delayed.getByRole("menuitem", { name: "Actualizar voces", exact: true }).click();
+  await delayed.waitForFunction(() => window.__readerSpeech.starts === 1);
+  assert.equal(await delayed.evaluate(() => window.__readerSpeech.last.voice.voiceURI), "test-dalia");
+  // Next's route announcer also has role=alert, even when it is empty.
+  assert.equal(await delayed.locator(".playback-notice[role=alert]").count(), 0);
+  assert.equal(await delayed.locator(".voice-startup-overlay, dialog[open]").count(), 0);
+  await delayed.keyboard.press("Escape");
+  await delayed.getByRole("button", { name: "Pausar", exact: true }).click();
+  // A new attempt that is cancelled must not speak/error after its late catalog.
+  await delayed.getByRole("button", { name: "Reiniciar", exact: true }).click();
+  await delayed.evaluate(voice => {
+    window.__readerVoices = [];
+    window.setTimeout(() => { window.__readerVoices = [voice]; }, 1700);
+  }, dalia);
+  const startsBeforeCancel = await delayed.evaluate(() => window.__readerSpeech.starts);
+  await delayed.getByRole("button", { name: "Reproducir", exact: true }).click();
+  await delayed.getByRole("button", { name: "Pausar", exact: true }).click();
+  await delayed.waitForTimeout(2000);
+  assert.equal(await delayed.evaluate(() => window.__readerSpeech.starts), startsBeforeCancel);
+  assert.equal(await delayed.locator(".playback-notice[role=alert]").count(), 0);
+  console.log(JSON.stringify({ delayedVoiceCatalog: "PASS", checks: "menu after 2s and playback after 1.7s without events, refresh independent of pending play, no probe audio, cancel prevents stale speech/error, Android help never fabricates Dalia" }));
+  await delayedContext.close();
   await browser.close();
   browser = undefined;
 
