@@ -2,7 +2,14 @@ import { createHash } from "node:crypto";
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { resolve, join, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { createRequire } from "node:module";
 import { JSDOM } from "jsdom";
+
+const require = createRequire(import.meta.url);
+// Use the installed Next version's cache identity, including route groups and
+// parallel slots, rather than guessing a hashed output directory.
+const { getRouteCacheKey } = require("next/dist/server/lib/route-cache-key.js");
+const { selectAppPageEntry } = require("next/dist/shared/lib/router/utils/app-paths.js");
 
 const ORIGIN = "https://reader-build.invalid";
 export const SHELL_PATH = "/reader-assets/offline-shell.html";
@@ -66,10 +73,30 @@ export async function createPrecacheManifest({ html, buildId, buildManifest, wor
 
 export async function generateReaderPrecache(root) {
   const prerender = JSON.parse(await readFile(join(root, ".next/prerender-manifest.json"), "utf8"));
-  if (prerender.routes?.["/"]?.initialRevalidateSeconds !== false) {
+  const rootRoute = prerender.routes?.["/"];
+  if (rootRoute?.initialRevalidateSeconds !== false ||
+      rootRoute.routeType !== undefined && rootRoute.routeType !== "page" ||
+      rootRoute.response !== undefined && rootRoute.response !== "complete" ||
+      rootRoute.compute !== undefined && rootRoute.compute !== "static" ||
+      rootRoute.initialStatus !== undefined && rootRoute.initialStatus !== 200) {
     throw new Error("Offline shell requires a statically prerendered root, without ISR or user data.");
   }
-  const html = await readFile(join(root, ".next/server/app/index.html"), "utf8");
+  const { config } = JSON.parse(await readFile(join(root, ".next/required-server-files.json"), "utf8"));
+  const useRouteCache = Boolean(config.adapterPath && config.output !== "export");
+  const appPaths = useRouteCache
+    ? JSON.parse(await readFile(join(root, ".next/server/app-paths-manifest.json"), "utf8")) : undefined;
+  const outputPath = (pathname, kind, extension, legacyPath) => {
+    if (!useRouteCache) return join(root, ".next/server/app", legacyPath);
+    const route = prerender.routes?.[pathname];
+    if (!route || route.initialRevalidateSeconds !== false) throw new Error(`Missing static prerender output: ${pathname}`);
+    const suffix = kind === "APP_PAGE" ? "/page" : "/route";
+    const sourceRoute = selectAppPageEntry(route.srcRoute ?? pathname, Object.keys(appPaths).filter(path => path.endsWith(suffix)));
+    const key = getRouteCacheKey(pathname, { kind, sourceRoute });
+    return join(root, ".next/server", `${key.slice(1)}${extension}`);
+  };
+  // The generated config determines the active layout. Never fall back to an
+  // older HTML/body file if an adapter's current prerender output is missing.
+  const html = await readFile(outputPath("/", "APP_PAGE", ".html", "index.html"), "utf8");
   const buildId = (await readFile(join(root, ".next/BUILD_ID"), "utf8")).trim();
   const buildManifest = JSON.parse(await readFile(join(root, ".next/build-manifest.json"), "utf8"));
   const workerSource = await readFile(join(root, "public/sw.js"), "utf8");
@@ -79,7 +106,7 @@ export async function generateReaderPrecache(root) {
     const relative = pathname.startsWith("/_next/static/") ? pathname.slice("/_next/".length) : pathname.slice(1);
     const file = resolve(base, relative);
     if (!file.startsWith(resolve(base) + sep)) throw new Error("Invalid offline resource path.");
-    if (pathname === "/favicon.ico") return readFile(join(root, ".next/server/app/favicon.ico.body"));
+    if (pathname === "/favicon.ico") return readFile(outputPath("/favicon.ico", "APP_ROUTE", ".body", "favicon.ico.body"));
     return readFile(file);
   };
   const directory = join(root, "public/reader-assets");

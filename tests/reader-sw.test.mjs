@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { mkdir, mkdtemp, readFile, rm as remove, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { createHash, webcrypto } from "node:crypto";
 import { test } from "node:test";
 import { runInNewContext } from "node:vm";
 import { gzipSync } from "node:zlib";
-import { createPrecacheManifest, SHELL_PATH } from "../scripts/generate-reader-precache.mjs";
+import { createPrecacheManifest, generateReaderPrecache, SHELL_PATH } from "../scripts/generate-reader-precache.mjs";
 
 const SW = readFileSync(new URL("../public/sw.js", import.meta.url), "utf8");
 const ORIGIN = "https://reader.test";
@@ -358,4 +361,83 @@ test("generated version changes with worker logic, HTML or build identity", asyn
   const a = await fixture("a");
   const b = await fixture("b");
   assert.notEqual(a.manifest.version, b.manifest.version);
+});
+
+async function buildFixture(t, { adapter = true, grouped = false, rootMetadata = {} } = {}) {
+  const root = await mkdtemp(join(tmpdir(), "reader-precache-build-"));
+  t.after(() => remove(root, { recursive: true, force: true }));
+  const put = async (path, bytes) => {
+    const file = join(root, path);
+    await mkdir(dirname(file), { recursive: true });
+    await writeFile(file, bytes);
+  };
+  const data = await fixture("build");
+  const html = data.files.get(SHELL_PATH).body.replace("</head>", '<link rel="icon" href="/favicon.ico?favicon.fixture.ico"></head>');
+  const sourceRoute = grouped ? "/(reader)/page" : "/page";
+  const hash = value => createHash("sha256").update(value).digest("hex");
+  const cachedHtml = `.next/server/route-cache/APP_PAGE/${hash(sourceRoute)}/$/index.html`;
+  const cachedIcon = `.next/server/route-cache/APP_ROUTE/${hash("/favicon.ico/route")}/$/favicon.ico.body`;
+  const htmlPath = adapter ? cachedHtml : ".next/server/app/index.html";
+  const iconPath = adapter ? cachedIcon : ".next/server/app/favicon.ico.body";
+  await put(".next/required-server-files.json", JSON.stringify({ config: adapter ? { adapterPath: "fixture-adapter" } : {} }));
+  await put(".next/prerender-manifest.json", JSON.stringify({ routes: {
+    "/": { initialRevalidateSeconds: false, routeType: "page", response: "complete", compute: "static", srcRoute: "/", dataRoute: "/index.rsc", ...rootMetadata },
+    "/favicon.ico": { initialRevalidateSeconds: false, srcRoute: "/favicon.ico", dataRoute: null },
+  } }));
+  await put(".next/server/app-paths-manifest.json", JSON.stringify({
+    [sourceRoute]: "app/page.js", "/_not-found/page": "app/_not-found/page.js", "/favicon.ico/route": "app/favicon.ico/route.js",
+  }));
+  await put(".next/BUILD_ID", "fixture-build");
+  await put(".next/build-manifest.json", JSON.stringify({ rootMainFiles: ["static/build.js"] }));
+  await put("public/sw.js", SW);
+  for (const [url, asset] of data.files) {
+    if (url === SHELL_PATH || url.startsWith("/reader-assets/offline/")) continue;
+    await put(url.startsWith("/_next/") ? ".next/" + url.slice("/_next/".length) : "public" + url, asset.body);
+  }
+  await put(htmlPath, html);
+  await put(iconPath, "current-icon-bytes");
+  // Opposite-layout and unrelated-page leftovers must never win selection.
+  await put(adapter ? ".next/server/app/index.html" : cachedHtml, "<html>Stale shell</html>");
+  await put(adapter ? ".next/server/app/favicon.ico.body" : cachedIcon, "stale-icon-bytes");
+  await put(`.next/server/route-cache/APP_PAGE/${hash("/_not-found/page")}/$/index.html`, "<html>Unrelated 404</html>");
+  return { root, html, htmlPath, iconPath };
+}
+
+test("generator selects current adapter HTML and favicon, including grouped root, over legacy leftovers", async t => {
+  for (const grouped of [false, true]) {
+    const { root, html } = await buildFixture(t, { adapter: true, grouped });
+    await generateReaderPrecache(root);
+    assert.equal(await readFile(join(root, "public", SHELL_PATH.slice(1)), "utf8"), html);
+    const js = await readFile(join(root, "public/reader-assets/offline-manifest.js"), "utf8");
+    const manifest = JSON.parse(js.slice("self.__READER_PRECACHE = ".length).trim().replace(/;$/, ""));
+    const digest = bytes => createHash("sha256").update(bytes).digest("hex");
+    assert.equal(manifest.entries.find(entry => entry.url === SHELL_PATH).sha256, digest(html));
+    assert.equal(manifest.entries.find(entry => entry.url === "/favicon.ico?favicon.fixture.ico").sha256, digest("current-icon-bytes"));
+  }
+});
+
+test("generator selects current non-adapter layout even if route-cache files remain", async t => {
+  const { root, html } = await buildFixture(t, { adapter: false });
+  await generateReaderPrecache(root);
+  assert.equal(await readFile(join(root, "public", SHELL_PATH.slice(1)), "utf8"), html);
+});
+
+test("missing current adapter outputs fail without publishing a manifest or falling back to old files", async t => {
+  for (const missing of ["htmlPath", "iconPath"]) {
+    const build = await buildFixture(t);
+    await remove(join(build.root, build[missing]));
+    await assert.rejects(generateReaderPrecache(build.root), { code: "ENOENT" });
+    await assert.rejects(readFile(join(build.root, "public/reader-assets/offline-manifest.js")), { code: "ENOENT" });
+  }
+});
+
+test("generator rejects ISR, partial/resuming shells and root error responses before copying assets", async t => {
+  for (const rootMetadata of [
+    { initialRevalidateSeconds: 60 }, { response: "initial" }, { compute: "resuming" },
+    { routeType: "shell" }, { initialStatus: 404 },
+  ]) {
+    const { root } = await buildFixture(t, { rootMetadata });
+    await assert.rejects(generateReaderPrecache(root), /statically prerendered root/);
+    await assert.rejects(readFile(join(root, "public/reader-assets/offline-manifest.js")), { code: "ENOENT" });
+  }
 });

@@ -75,14 +75,28 @@ No son APIs de streaming: un fragmento se entrega cuando termina su generación.
 
 Fuentes primarias y enlaces de las demos: sección Voces del `README.md`. No se utilizó una lista de terceros como prueba de disponibilidad o de calidad audible.
 
+También se revisaron otras tres familias, sin incorporarlas como servicios activos:
+
+| Candidata | Lo comprobado en su documentación | Motivo para no integrarla ahora |
+| --- | --- | --- |
+| [MMS argentino de ylacombe](https://huggingface.co/ylacombe/mms-spa-finetuned-argentinian-monospeaker) | Español argentino, VITS de 83 M parámetros, ejemplos Python/Transformers.js, licencia CC BY-NC 4.0 | La ficha no proporciona un Inference Provider; ejecutar el ejemplo JS volvería a descargar un modelo, contrario a la preferencia actual |
+| [Coqui XTTS-v2](https://huggingface.co/coqui/XTTS-v2) | Español, referencia de voz, audio 24 kHz y ejemplos de motor Python; licencia CPML | No trae una narradora mexicana concreta garantizada ni un Inference Provider; requiere motor separado y referencia autorizada |
+| [Qwen3-TTS VoiceDesign](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign) | Español y control por instrucciones, licencia Apache 2.0; ejemplos de PyTorch/CUDA | No tiene Inference Provider para este checkpoint; fidelidad mexicana y rendimiento en el equipo del usuario no comprobados |
+
+Consulta de estas tarjetas primarias: 10 de octubre de 2026. Sus capacidades declaradas no constituyen una prueba audible ni justifican anunciar un servidor gratuito y continuo.
+
 ## Verificación de esta tanda
 
-- **290 pruebas automatizadas aprobadas**, sin fallos ni omisiones: texto/rendimiento, importación, almacenamiento, motores históricos, caché offline, servidor, límites del proxy y búfer.
+- **294 pruebas automatizadas aprobadas**, sin fallos ni omisiones: texto/rendimiento, importación, almacenamiento, motores históricos, caché offline, servidor, límites del proxy y búfer.
 - ESLint y compilación de producción correctos. `npm ci` repetido satisfactoriamente. La compilación incluye `/api/speech` y genera 16 recursos de núcleo offline, aproximadamente 1,11 MB; no incluye modelos.
 - Chromium con seguridad activa, perfiles aislados a 1280×900 y 390×844: transporte con WAV reproducido realmente, pausa/reanudación, velocidad, saltos de línea y párrafo preparados sin repetir su petición, respaldo tras rechazo de reproducción, pantalla completa, lectura temporal y borrado. Sin errores JavaScript/CSP ni peticiones de modelos. Los WAV de esta prueba son sintéticos; no acreditan calidad de voz.
 - Se consulta la API real antes de simular audio: una petición del mismo origen llega a validación de voz y retorna 400 para una voz inválida. La comprobación encontró y corrigió el problema de hostname interno de Next.
 - Prueba PWA: recarga offline servida por el service worker, preparación local de texto, icono y puntuación conservados, sin POST API.
-- Este entorno no resuelve el DNS de los Spaces (`EAI_AGAIN`), por lo que el proxy real no puede verificarse aquí. La integración final debe comprobarse desde Vercel. El fallo no se presenta como una generación satisfactoria.
+- La prueba local del proxy falló al validar DNS de los Spaces (`EAI_AGAIN`). Una conexión HTTPS convencional posterior sí respondió 200, pero no acredita el transporte con validación/pinning. La integración final debe comprobarse desde Vercel; el fallo local no se presenta como una generación satisfactoria.
 - No se han probado Android/iOS físicos, voces de cada sistema, documentos privados del usuario ni todas las composiciones PDF/OCR posibles.
 
 La comprobación de GitHub/Vercel se incorpora a este informe después de publicar. Un build local no acredita que la versión esté activa en el dominio.
+
+El primer commit de código es `3a7bfba69aad6c114ed44c0bd90a0a6510781cb9`. GitHub Actions completó instalación, tests, lint, build limpio y navegador satisfactoriamente en el job `114093860849`. El primer intento de Vercel compiló Next correctamente, pero su postbuild no encontró el HTML en la ruta antigua del generador; se corrige la compatibilidad del precache con el adapter actual sin omitir la verificación de integridad ni la condición de shell estático.
+
+La corrección se verificó en una compilación limpia con un adaptador temporal real de Next 16.4. El generador original reprodujo exactamente el error `ENOENT`; el corregido terminó con código 0 y generó los 16 recursos. El HTML y el favicon coinciden por hash con los outputs actuales de `server/route-cache`. Cuatro regresiones adicionales comprueban ambos layouts, rutas agrupadas, archivos residuales, outputs ausentes y rechazo de shells incompletos/ISR/error. No se añadió el adaptador temporal a la configuración del repositorio.
