@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { cleanTextWithoutInventing, createLegibleReconstructionPrompt } from "@/lib/reader/text";
 import { readBoundedJson, readRemote, SafeHttpError } from "@/lib/server/http-safety";
+import { acquireApiRequest, requestErrorHeaders } from "@/lib/server/request-guard";
 
 export const runtime = "nodejs";
 
@@ -18,36 +19,44 @@ const outputSchema = z.object({
 });
 
 export async function POST(request: Request) {
-  let text: string;
+  let release: (() => void) | undefined;
   try {
-    ({ text } = reconstructSchema.parse(await readBoundedJson(request, 100_000)));
+    release = acquireApiRequest(request, {
+      scope: "text-reconstruct", contentTypes: ["application/json"], maxBodyBytes: 100_000,
+      maxRequests: 6, maxGlobalRequests: 24, windowMs: 60_000, maxConcurrent: 2,
+    });
+    const { text } = reconstructSchema.parse(await readBoundedJson(request, 100_000));
+    const fallback = (message: string) => NextResponse.json({
+      mode: "clean-only", message, text: cleanTextWithoutInventing(text),
+    }, { headers: requestErrorHeaders() });
+    const endpoint = process.env.GPT_OSS_ENDPOINT;
+    if (!endpoint) return fallback("No hay IA configurada. Se aplicó limpieza local.");
+
+    try {
+      const response = await readRemote(endpoint, {
+        signal: request.signal, method: "POST", trustedEndpoint: true, maxRedirects: 0,
+        timeoutMs: 20_000, maxBytes: 200_000,
+        allowedContentTypes: ["application/json"],
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ prompt: createLegibleReconstructionPrompt(text), temperature: 0.1, max_tokens: 4096 }),
+      });
+      if (response.status < 200 || response.status >= 300) throw new Error("upstream");
+      const data = outputSchema.parse(JSON.parse(response.body.toString("utf8")));
+      const reason = data.choices?.[0]?.finish_reason ?? data.finish_reason;
+      if (reason && !["stop", "eos", "end_turn"].includes(reason)) throw new Error("incomplete");
+      const reconstructed = (data.text ?? data.output ?? data.choices?.[0]?.message?.content ?? data.choices?.[0]?.text ?? "").trim();
+      if (!reconstructed || reconstructed.length > 48_000) throw new Error("invalid output");
+      return NextResponse.json({ mode: "reconstructed", message: "Texto reconstruido con IA configurada. Revisa el resultado.", text: reconstructed },
+        { headers: requestErrorHeaders() });
+    } catch (error) {
+      if (request.signal.aborted) throw error;
+      return fallback("La IA no devolvió un resultado completo y válido. Se aplicó limpieza local.");
+    }
   } catch (error) {
     return NextResponse.json({ error: error instanceof SafeHttpError ? error.message : "Envía texto válido de hasta 24,000 caracteres." },
-      { status: error instanceof SafeHttpError ? error.status : error instanceof z.ZodError && error.issues.some((issue) => issue.code === "too_big") ? 413 : 400 });
-  }
-  const fallback = (message: string) => NextResponse.json({
-    mode: "clean-only", message, text: cleanTextWithoutInventing(text),
-  }, { headers: { "cache-control": "no-store" } });
-  const endpoint = process.env.GPT_OSS_ENDPOINT;
-  if (!endpoint) return fallback("No hay IA configurada. Se aplicó limpieza local.");
-
-  try {
-    const response = await readRemote(endpoint, {
-      method: "POST", trustedEndpoint: true, maxRedirects: 0,
-      timeoutMs: 20_000, maxBytes: 200_000,
-      allowedContentTypes: ["application/json"],
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ prompt: createLegibleReconstructionPrompt(text), temperature: 0.1, max_tokens: 4096 }),
-    });
-    if (response.status < 200 || response.status >= 300) throw new Error("upstream");
-    const data = outputSchema.parse(JSON.parse(response.body.toString("utf8")));
-    const reason = data.choices?.[0]?.finish_reason ?? data.finish_reason;
-    if (reason && !["stop", "eos", "end_turn"].includes(reason)) throw new Error("incomplete");
-    const reconstructed = (data.text ?? data.output ?? data.choices?.[0]?.message?.content ?? data.choices?.[0]?.text ?? "").trim();
-    if (!reconstructed || reconstructed.length > 48_000) throw new Error("invalid output");
-    return NextResponse.json({ mode: "reconstructed", message: "Texto reconstruido con IA configurada. Revisa el resultado.", text: reconstructed },
-      { headers: { "cache-control": "no-store" } });
-  } catch {
-    return fallback("La IA no devolvió un resultado completo y válido. Se aplicó limpieza local.");
+      { status: error instanceof SafeHttpError ? error.status : error instanceof z.ZodError && error.issues.some((issue) => issue.code === "too_big") ? 413 : 400,
+        headers: requestErrorHeaders(error) });
+  } finally {
+    release?.();
   }
 }

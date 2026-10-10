@@ -19,7 +19,7 @@ export const DEFAULT_READER_STATE: StoredReaderState = {
     updatedAt: new Date(0).toISOString(),
   },
   preferences: {
-    voiceId: "piper-updated",
+    voiceId: "browser-standard",
     rate: 1,
     theme: "warm-paper",
     readingMode: "standard",
@@ -36,6 +36,10 @@ export type ReaderStorageResult =
 
 export type ReaderLoadResult = ReaderStorageResult & { state: StoredReaderState };
 
+export type ReaderClearOptions =
+  | { mode?: "reset"; recoverPending?: never }
+  | { mode: "all"; recoverPending?: boolean };
+
 const integer = z.number().int().nonnegative();
 const identifier = z.string().min(1).max(256);
 const timestamp = z.string().max(64).refine((value) => Number.isFinite(Date.parse(value)));
@@ -50,9 +54,15 @@ const progressSchema = z.object({
 });
 const preferencesSchema = z.object({
   voiceId: identifier,
-  rate: z.union([z.literal(1), z.literal(0.85), z.literal(0.75), z.literal(0.65), z.literal(0.5)]),
+  rate: z.union([
+    z.literal(1), z.literal(0.85), z.literal(0.75), z.literal(0.65), z.literal(0.5),
+    z.literal(1.25), z.literal(1.5), z.literal(2),
+  ]),
   theme: z.enum(["warm-paper", "night"]),
   readingMode: z.enum(["standard", "focus"]),
+  language: z.enum(["auto", "es", "en"]).optional(),
+  textScale: z.union([z.literal(0.9), z.literal(1), z.literal(1.1), z.literal(1.25)]).optional(),
+  systemVoiceURI: identifier.optional(),
 });
 const sessionSchema = z.object({ signedIn: z.boolean(), userName: z.string().max(256) });
 const documentSchema = z.object({
@@ -113,6 +123,14 @@ const checkpointSchema = z.object({
   preferences: preferencesSchema,
   session: sessionSchema,
 });
+// Keep only coordination metadata after an explicit privacy erase. Removing the key
+// entirely would let a stale tab with a null baseline publish pre-erase data again.
+const erasedCheckpointSchema = z.object({
+  version: z.literal(2),
+  revision: identifier,
+  cleared: z.literal(true),
+  pendingClear: z.boolean().optional(),
+}).strict();
 
 type DocumentWrite = {
   reference: ReaderDocument;
@@ -120,14 +138,18 @@ type DocumentWrite = {
   key: string;
   ready: boolean;
   pending: Promise<ReaderStorageResult>;
+  controller?: AbortController;
 };
 let documentWrite: DocumentWrite | undefined;
+const pendingDocumentWrites = new Set<AbortController>();
 let saveSequence = 0;
 let isClearing = false;
 // Only a successful load or this instance's own publication may advance this baseline.
 let knownCheckpoint: string | null = null;
 // Failed loads authorize explicit recovery only, never automatic saving.
 let recoveryCheckpoint: string | null | undefined;
+// Own failed erases can retry; a new instance requires explicit recoverPending consent.
+let pendingPrivateClear: string | undefined;
 
 function defaults(): StoredReaderState {
   return structuredClone(DEFAULT_READER_STATE);
@@ -137,12 +159,22 @@ function failure(code: "invalid" | "storage" | "unavailable" | "superseded", err
   return { ok: false, code, error };
 }
 
+/** Stop pending publications when the UI enters temporary reading. Does not erase committed data. */
+export function cancelPendingReaderSaves(): void {
+  ++saveSequence;
+  for (const controller of pendingDocumentWrites) controller.abort();
+  if (documentWrite && !documentWrite.ready) {
+    documentWrite = undefined;
+  }
+}
+
 // Resolve only after transaction completion, not after the put request succeeds.
 function documentOperation(
   operation: "get" | "put" | "checkpoint",
   key?: string,
   value?: ReaderDocument,
   publish?: (store: IDBObjectStore, stored: unknown) => ReaderStorageResult,
+  signal?: AbortSignal,
 ): Promise<unknown> {
   return new Promise((resolve, reject) => {
     let database: IDBDatabase | undefined;
@@ -152,14 +184,21 @@ function documentOperation(
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      signal?.removeEventListener("abort", cancel);
       database?.close();
       if (error) reject(error);
       else resolve(result);
+    };
+    const cancel = () => {
+      try { transaction?.abort(); } catch { /* A committed transaction cannot be undone. */ }
+      finish(new Error("Guardado cancelado."));
     };
     const timer = setTimeout(() => {
       finish(new Error("IndexedDB no respondio a tiempo."));
       try { transaction?.abort(); } catch { /* The transaction may already be closed. */ }
     }, 10_000);
+    signal?.addEventListener("abort", cancel, { once: true });
+    if (signal?.aborted) { cancel(); return; }
     try {
       const request = window.indexedDB.open(DATABASE_NAME, 1);
       request.onblocked = () => finish(new Error("IndexedDB esta bloqueado por otra ventana."));
@@ -207,6 +246,14 @@ function hasPendingClear(raw: string | null): boolean {
   catch { return false; }
 }
 
+function hasPendingPrivateClear(raw: string | null): boolean {
+  if (raw === null) return false;
+  try {
+    const parsed = erasedCheckpointSchema.safeParse(JSON.parse(raw));
+    return parsed.success && parsed.data.pendingClear === true;
+  } catch { return false; }
+}
+
 function pendingClearError(): ReaderStorageResult {
   return failure("storage", "Borrado pendiente en otra pestana. Espera a que termine y vuelve a cargar; no se puede guardar ni recuperar ese estado provisional.");
 }
@@ -216,11 +263,12 @@ async function publishCheckpoint(
   checkpoint: z.infer<typeof checkpointSchema>,
   expected: string | null,
   sequence: number,
-  clear = false,
+  clear?: "reset" | "all",
 ): Promise<ReaderStorageResult> {
   let published: string | undefined;
   let clearCommitted = false;
   const previousKnown = knownCheckpoint;
+  const persisted = clear === "all" ? { version: 2, cleared: true } : checkpoint;
   try {
     const result = await documentOperation("checkpoint", checkpoint.documentKey ?? undefined, undefined, (store, stored) => {
       if (sequence !== saveSequence) return failure("superseded", "Una solicitud posterior reemplazo este guardado.");
@@ -228,7 +276,7 @@ async function publishCheckpoint(
       if (checkpoint.documentKey !== null && stored !== checkpoint.documentKey) {
         return failure("storage", "El documento ya no esta disponible. Recarga antes de volver a guardar.");
       }
-      const raw = JSON.stringify({ ...checkpoint, revision: globalThis.crypto.randomUUID(), ...(clear ? { pendingClear: true } : {}) });
+      const raw = JSON.stringify({ ...persisted, revision: globalThis.crypto.randomUUID(), ...(clear ? { pendingClear: true } : {}) });
       window.localStorage.setItem(CHECKPOINT_KEY, raw);
       published = raw;
       if (!clear) knownCheckpoint = raw;
@@ -239,15 +287,20 @@ async function publishCheckpoint(
     if (result.ok) {
       if (clear && published !== undefined) {
         clearCommitted = true;
+        if (clear === "all") pendingPrivateClear = published;
         // Keep pending visible throughout the commit/finalization gap, never as recoverable corruption.
-        const finalRaw = JSON.stringify({ ...checkpoint, revision: globalThis.crypto.randomUUID() });
+        const finalRaw = JSON.stringify({ ...persisted, revision: globalThis.crypto.randomUUID() });
         const finalized = await documentOperation("checkpoint", undefined, undefined, () => {
           if (window.localStorage.getItem(CHECKPOINT_KEY) !== published) return conflict();
+          // Remove legacy only after the document clear commits. A failed clear
+          // must never destroy the sole durable copy of a migrated v1 document.
+          if (clear === "all") window.localStorage.removeItem(STORAGE_KEY);
           window.localStorage.setItem(CHECKPOINT_KEY, finalRaw);
           return { ok: true };
         }) as ReaderStorageResult;
         if (!finalized.ok) return finalized;
         knownCheckpoint = finalRaw;
+        if (clear === "all") pendingPrivateClear = undefined;
       }
       recoveryCheckpoint = undefined;
     }
@@ -288,7 +341,17 @@ export async function loadReaderState(): Promise<ReaderLoadResult> {
     if (hasPendingClear(raw)) return { ...pendingClearError(), state };
     recoveryCheckpoint = raw;
     if (raw !== null) {
-      const parsed = checkpointSchema.safeParse(JSON.parse(raw));
+      const decoded: unknown = JSON.parse(raw);
+      if (erasedCheckpointSchema.safeParse(decoded).success) {
+        if (sequence !== saveSequence || window.localStorage.getItem(CHECKPOINT_KEY) !== raw) {
+          return { ...conflict(), state };
+        }
+        knownCheckpoint = raw;
+        recoveryCheckpoint = undefined;
+        documentWrite = undefined;
+        return { ok: true, state };
+      }
+      const parsed = checkpointSchema.safeParse(decoded);
       if (!parsed.success) return { ...failure("invalid", "Checkpoint invalido; no se modificaron los datos."), state };
       const checkpoint = parsed.data;
       let document: ReaderDocument | null = null;
@@ -374,16 +437,32 @@ export async function saveReaderState(state: StoredReaderState): Promise<ReaderS
           reference: state.document, id: state.document.id,
           key: globalThis.crypto.randomUUID(), ready: false,
           pending: Promise.resolve({ ok: true }),
+          controller: new AbortController(),
         };
         const writing = entry;
         documentWrite = writing;
-        writing.pending = documentOperation("put", writing.key, parsed.data).then(
-          () => { writing.ready = true; return { ok: true } as const; },
+        pendingDocumentWrites.add(writing.controller!);
+        // Check the revision under the same lock that writes the document. A
+        // delayed open from a pre-erase tab must not recreate an orphaned book.
+        writing.pending = documentOperation("checkpoint", undefined, undefined, (store) => {
+          const latest = window.localStorage.getItem(CHECKPOINT_KEY);
+          if (hasPendingClear(latest)) return pendingClearError();
+          if (latest !== expected) return conflict();
+          store.put(parsed.data, writing.key);
+          return { ok: true };
+        }, writing.controller!.signal).then(
+          (value) => {
+            const result = value as ReaderStorageResult;
+            if (result.ok) writing.ready = true;
+            else if (documentWrite === writing) documentWrite = undefined;
+            return result;
+          },
           () => {
             if (documentWrite === writing) documentWrite = undefined;
+            if (writing.controller?.signal.aborted) return failure("superseded", "Una solicitud posterior reemplazo este guardado.");
             return failure("storage", "No se pudo guardar el documento en IndexedDB.");
           },
-        );
+        ).finally(() => pendingDocumentWrites.delete(writing.controller!));
       }
       if (!entry.ready) {
         const result = await entry.pending;
@@ -399,22 +478,30 @@ export async function saveReaderState(state: StoredReaderState): Promise<ReaderS
   }
 }
 
-/** Reset v2 explicitly; retain v1 and a null checkpoint so legacy data cannot reappear. */
-export async function clearReaderState(): Promise<ReaderStorageResult> {
+/** Reset by default. Explicit all/recoverPending may complete an interrupted privacy erase. */
+export async function clearReaderState(options: ReaderClearOptions = {}): Promise<ReaderStorageResult> {
   if (isClearing) return failure("storage", "Ya hay un borrado en curso.");
+  const mode = options.mode ?? "reset";
+  if (mode !== "reset" && mode !== "all") return failure("invalid", "Modo de borrado invalido.");
+  if (options.recoverPending === true && mode !== "all") {
+    return failure("invalid", "La recuperacion del borrado requiere el modo all explicito.");
+  }
   const sequence = ++saveSequence;
   if (typeof window === "undefined") return failure("unavailable", "Almacenamiento no disponible.");
   isClearing = true;
   try {
     const current = window.localStorage.getItem(CHECKPOINT_KEY);
-    if (hasPendingClear(current)) return pendingClearError();
-    const expected = recoveryCheckpoint !== undefined && current === recoveryCheckpoint
+    const retryPrivateClear = mode === "all" && current !== null && (
+      current === pendingPrivateClear || (options.recoverPending === true && hasPendingPrivateClear(current))
+    );
+    if (hasPendingClear(current) && !retryPrivateClear) return pendingClearError();
+    const expected = retryPrivateClear ? current : recoveryCheckpoint !== undefined && current === recoveryCheckpoint
       ? recoveryCheckpoint : knownCheckpoint;
     const empty = defaults();
     const result = await publishCheckpoint({
       version: 2, documentKey: null, documentId: null,
       progress: empty.progress, preferences: empty.preferences, session: empty.session,
-    }, expected, sequence, true);
+    }, expected, sequence, mode);
     if (result.ok) documentWrite = undefined;
     return result;
   } catch {

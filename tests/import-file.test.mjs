@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { pdfPageText } from "../src/lib/reader/import-file.ts";
+import { IMPORT_LIMITS, importFile, pdfPageText, validateDocxArchive } from "../src/lib/reader/import-file.ts";
 import { prepareTextForReading } from "../src/lib/reader/text.ts";
 
 // Synthetic PDF.js TextItems; these fixtures never read or write a user's PDF.
@@ -132,6 +132,156 @@ test("page scale and extraction order do not change paragraph reconstruction", (
   }
 });
 
+const leftColumn = ["Primera columna linea uno.", "Primera columna linea dos.", "Primera columna linea tres."];
+const rightColumn = ["Segunda columna linea uno.", "Segunda columna linea dos.", "Segunda columna linea tres."];
+
+function columns(top = 720, stagger = 0) {
+  return leftColumn.flatMap((line, index) => [item(line, top - index * 24, { width: 165 }),
+    item(rightColumn[index], top - index * 24 - stagger, { x: 350, width: 170 })]);
+}
+
+test("two columns are read down the left before the right, independent of item order or scale", () => {
+  const expected = `${leftColumn.join(" ")}\n\n${rightColumn.join(" ")}`;
+  for (const scale of [0.5, 1, 2, 4]) {
+    const source = columns().reverse().map((part) => ({ ...part, height: part.height * scale,
+      width: part.width * scale, transform: part.transform.map((value) => value * scale) }));
+    assert.equal(pdfPageText(source), expected);
+  }
+});
+
+test("staggered two-column baselines retain column reading order", () => {
+  assert.equal(pdfPageText(columns(720, 10)), `${leftColumn.join(" ")}\n\n${rightColumn.join(" ")}`);
+});
+
+test("a modest 24-point gutter is sufficient when it persists down both columns", () => {
+  const source = leftColumn.flatMap((line, index) => [item(line, 720 - index * 24, { width: 240 }),
+    item(rightColumn[index], 720 - index * 24, { x: 314, width: 240 })]);
+  assert.equal(pdfPageText(source), `${leftColumn.join(" ")}\n\n${rightColumn.join(" ")}`);
+});
+
+test("full-width headings and paragraphs divide two-column bands", () => {
+  const text = pdfPageText([item("Titulo general", 770, { size: 22, width: 490 }), ...columns(),
+    item("Parrafo intermedio de ancho completo.", 620, { width: 490 }), ...columns(580)]);
+  assert.equal(text, ["# Titulo general", leftColumn.join(" "), rightColumn.join(" "),
+    "Parrafo intermedio de ancho completo.", leftColumn.join(" "), rightColumn.join(" ")].join("\n\n"));
+});
+
+test("an isolated wide space within a line does not invent a second column", () => {
+  assert.equal(pdfPageText([item("Texto de una", 720, { width: 80 }), item("sola linea.", 720, { x: 230 })]),
+    "Texto de una sola linea.");
+});
+
+test("persistent three-column layouts produce a useful error instead of scrambled text", () => {
+  const source = [720, 696, 672].flatMap((y) => [50, 250, 450].map((x) => item("Texto de columna.", y, { x, width: 120 })));
+  assert.throws(() => pdfPageText(source), /orden de lectura fiable.*columna/);
+});
+
+test("invalid, rotated and partially missing geometry does not silently discard text", () => {
+  for (const damaged of [
+    { ...item("Texto.", 720), width: NaN },
+    { ...item("Texto.", 720), transform: [12, 0, 0, 12, Infinity, 720] },
+    { ...item("Texto.", 720), transform: [0, 12, -12, 0, 50, 720] },
+  ]) assert.throws(() => pdfPageText([damaged]), /orden de lectura fiable/);
+  assert.throws(() => pdfPageText([item("Texto posicionado.", 720), { str: "Texto sin posicion." }]), /orden de lectura fiable/);
+});
+
+test("per-page fragment and text budgets are enforced before reconstruction", () => {
+  assert.throws(() => pdfPageText(Array.from({ length: IMPORT_LIMITS.pdfPageItems + 1 }, () => ({ str: "" }))), /fragmentos de texto/);
+  assert.throws(() => pdfPageText([item("a".repeat(IMPORT_LIMITS.pdfPageChars + 1), 720, { width: 500 })]), /caracteres/);
+  assert.equal(pdfPageText([item("a".repeat(IMPORT_LIMITS.pdfPageChars), 720, { width: 500 })]).length, IMPORT_LIMITS.pdfPageChars);
+});
+
+test("thousands of unordered lines with distinct font sizes retain all text", () => {
+  const source = Array.from({ length: 3000 }, (_, index) => item("Palabra.", 60_000 - index * 20,
+    { size: 12 + index * 0.00001, width: 45 })).reverse();
+  assert.equal(pdfPageText(source).split(/\s+/).length, source.length);
+});
+
+async function docxZip(extra = {}) {
+  const { default: JSZip } = await import("jszip");
+  const zip = new JSZip();
+  zip.file("[Content_Types].xml", '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>');
+  zip.file("word/document.xml", '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Texto de prueba.</w:t></w:r></w:p></w:body></w:document>');
+  for (const [name, value] of Object.entries(extra)) zip.file(name, value);
+  return zip.generateAsync({ type: "arraybuffer", compression: "DEFLATE" });
+}
+
+function editCentralDirectory(bytes, edit) {
+  const view = new DataView(bytes);
+  const end = bytes.byteLength - 22;
+  let cursor = view.getUint32(end + 16, true);
+  const decoder = new TextDecoder();
+  while (cursor < end) {
+    const nameLength = view.getUint16(cursor + 28, true);
+    const name = decoder.decode(new Uint8Array(bytes, cursor + 46, nameLength));
+    edit(view, cursor, name);
+    cursor += 46 + nameLength + view.getUint16(cursor + 30, true) + view.getUint16(cursor + 32, true);
+  }
+  return bytes;
+}
+
+test("DOCX preflight accepts ordinary stored and deflated archives", async () => {
+  await validateDocxArchive(await docxZip(), new AbortController().signal);
+  const { default: JSZip } = await import("jszip");
+  const zip = await JSZip.loadAsync(await docxZip());
+  await validateDocxArchive(await zip.generateAsync({ type: "arraybuffer", compression: "STORE" }), new AbortController().signal);
+});
+
+test("DOCX declared XML, expanded-total and entry-count budgets fail before conversion", async () => {
+  const xml = editCentralDirectory(await docxZip(), (view, cursor, name) => {
+    if (name === "word/document.xml") view.setUint32(cursor + 24, IMPORT_LIMITS.docxXmlBytes + 1, true);
+  });
+  await assert.rejects(validateDocxArchive(xml, new AbortController().signal), /4 MB descomprimidos/);
+  const total = editCentralDirectory(await docxZip(Object.fromEntries(Array.from({ length: 5 }, (_, i) => [`media/image${i}.bin`, "x"]))), (view, cursor, name) => {
+    if (name.endsWith(".bin")) view.setUint32(cursor + 24, IMPORT_LIMITS.docxEntryBytes, true);
+  });
+  await assert.rejects(validateDocxArchive(total, new AbortController().signal), /32 MB descomprimidos/);
+  const many = await docxZip(Object.fromEntries(Array.from({ length: IMPORT_LIMITS.docxEntries }, (_, i) => [`part${i}.bin`, "x"])));
+  await assert.rejects(validateDocxArchive(many, new AbortController().signal), /archivos internos/);
+});
+
+test("DOCX counts actual inflation and rejects a dishonest small declared size", async () => {
+  const compressed = editCentralDirectory(await docxZip({ "word/document.xml": "a".repeat(200_000) }), (view, cursor, name) => {
+    if (name === "word/document.xml") view.setUint32(cursor + 24, 1, true);
+  });
+  await assert.rejects(validateDocxArchive(compressed, new AbortController().signal), /descompresi\u00f3n real/);
+});
+
+test("DOCX malformed archives, missing document and ZIP64 are rejected", async () => {
+  await assert.rejects(validateDocxArchive(new ArrayBuffer(8), new AbortController().signal), /ZIP/);
+  const missing = editCentralDirectory(await docxZip(), (view, cursor, name) => {
+    if (name === "word/document.xml") new Uint8Array(view.buffer, cursor + 46, name.length).set(new TextEncoder().encode("word/xxxxxxxx.xml"));
+  });
+  await assert.rejects(validateDocxArchive(missing, new AbortController().signal), /ZIP/);
+  const zip64 = await docxZip();
+  new DataView(zip64).setUint16(zip64.byteLength - 22 + 10, 0xffff, true);
+  await assert.rejects(validateDocxArchive(zip64, new AbortController().signal), /ZIP/);
+});
+
+test("DOCX validation remains cancellable during inflation", async () => {
+  const bytes = await docxZip({ "word/document.xml": "a".repeat(1_000_000) });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 0);
+  try { await assert.rejects(validateDocxArchive(bytes, controller.signal), { name: "AbortError" }); }
+  finally { clearTimeout(timer); }
+});
+
+test("UTF-8 text respects the total character budget and keeps cancellation", async () => {
+  const priorWindow = globalThis.window;
+  globalThis.window = {};
+  try {
+    await assert.rejects(importFile(new File(["a".repeat(IMPORT_LIMITS.textChars + 1)], "large.txt"), {
+      signal: new AbortController().signal, onStatus() {},
+    }), /300.000 caracteres/);
+    const controller = new AbortController();
+    controller.abort();
+    await assert.rejects(importFile(new File(["Texto."], "normal.txt"), { signal: controller.signal, onStatus() {} }), { name: "AbortError" });
+  } finally {
+    if (priorWindow === undefined) delete globalThis.window;
+    else globalThis.window = priorWindow;
+  }
+});
+
 // Complete PDF bytes, including xref, held only in memory. No on-disk fixture exists.
 function makePdfFixture(items) {
   const content = items.map(({ str, transform }) => {
@@ -200,4 +350,16 @@ test("real PDF.js preserves the reported accented multiline title as a single he
   } finally {
     await loadingTask.destroy();
   }
+});
+
+test("real PDF.js text fragments preserve two-column reading order", async () => {
+  const { getDocument } = await import("pdfjs-dist/legacy/build/pdf.mjs");
+  const loadingTask = getDocument({ data: makePdfFixture(columns()), useSystemFonts: true });
+  try {
+    const pdf = await loadingTask.promise;
+    const page = await pdf.getPage(1);
+    const content = await page.getTextContent();
+    assert.equal(pdfPageText(content.items), `${leftColumn.join(" ")}\n\n${rightColumn.join(" ")}`);
+    page.cleanup();
+  } finally { await loadingTask.destroy(); }
 });

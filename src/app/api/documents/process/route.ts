@@ -4,7 +4,8 @@ import { pathToFileURL } from "node:url";
 import type { DocumentInitParameters } from "pdfjs-dist/types/src/display/api";
 import { z } from "zod";
 import { cleanTextForSpeech, createDocumentFromText, incoherenceScore } from "@/lib/reader/text";
-import { MAX_REQUEST_BYTES, MAX_TEXT_CHARS, readBoundedBody, readBoundedJson, readRemote, SafeHttpError } from "@/lib/server/http-safety";
+import { assertDocxArchiveLimits, assertPdfTextItemLimits, MAX_PDF_TOTAL_ITEMS, MAX_REQUEST_BYTES, MAX_TEXT_CHARS, readBoundedBody, readBoundedJson, readRemote, SafeHttpError } from "@/lib/server/http-safety";
+import { acquireApiRequest, requestErrorHeaders } from "@/lib/server/request-guard";
 
 export const runtime = "nodejs";
 
@@ -40,9 +41,14 @@ const textPayloadSchema = z.object({
 
 export async function POST(request: NextRequest) {
   const contentType = request.headers.get("content-type") ?? "";
+  let release: (() => void) | undefined;
 
   try {
-    if (contentType.includes("multipart/form-data")) {
+    release = acquireApiRequest(request, {
+      scope: "documents-process", contentTypes: ["application/json", "multipart/form-data"], maxBodyBytes: MAX_REQUEST_BYTES,
+      maxRequests: 20, maxGlobalRequests: 80, windowMs: 60_000, maxConcurrent: 4,
+    });
+    if (contentType.split(";", 1)[0].trim().toLowerCase() === "multipart/form-data") {
       const bytes = await readBoundedBody(request);
       let formData: FormData;
       try {
@@ -108,16 +114,16 @@ export async function POST(request: NextRequest) {
         throw new DocumentProcessError("Pega una dirección web válida.", 400);
       }
 
-      const article = await extractWebsiteText(payload.url);
+      const article = await extractWebsiteText(payload.url, request.signal);
       return documentResponse({
         document: createDocumentFromText({
           title: article.title || new URL(payload.url).hostname,
-        source: "website",
-        sourceLabel: payload.url,
-        text: article.text,
-        qualityStatus: "ready",
-        qualityMessage: "Sitio web procesado y listo para escuchar.",
-      }),
+          source: "website",
+          sourceLabel: payload.url,
+          text: article.text,
+          qualityStatus: "ready",
+          qualityMessage: "Sitio web procesado y listo para escuchar.",
+        }),
       });
     }
 
@@ -126,7 +132,7 @@ export async function POST(request: NextRequest) {
         throw new DocumentProcessError("Pega una liga de Google Docs válida.", 400);
       }
 
-      const exported = await extractGoogleDocText(payload.url);
+      const exported = await extractGoogleDocText(payload.url, request.signal);
       return documentResponse({
         document: createDocumentFromText({
           title: exported.title,
@@ -156,18 +162,20 @@ export async function POST(request: NextRequest) {
     });
   } catch (error) {
     if (error instanceof DocumentProcessError || error instanceof SafeHttpError) {
-      return NextResponse.json({ error: error.message }, { status: error.status });
+      return NextResponse.json({ error: error.message }, { status: error.status, headers: requestErrorHeaders(error) });
     }
 
     if (error instanceof z.ZodError) {
-      return NextResponse.json({ error: "La solicitud no tiene un formato válido o supera el límite permitido." }, { status: error.issues.some((issue) => issue.code === "too_big") ? 413 : 400 });
+      return NextResponse.json({ error: "La solicitud no tiene un formato válido o supera el límite permitido." }, { status: error.issues.some((issue) => issue.code === "too_big") ? 413 : 400, headers: requestErrorHeaders() });
     }
 
     // Keep diagnostics server-side; never log the request body or document text.
     console.error("[document-process] Unexpected processing failure", error instanceof Error
       ? { name: error.name, message: error.message, stack: error.stack?.split("\n").slice(1, 5).join("\n") }
       : { name: "UnknownError" });
-    return NextResponse.json({ error: "No se pudo procesar el contenido. Revisa el formato e intenta nuevamente." }, { status: 500 });
+    return NextResponse.json({ error: "No se pudo procesar el contenido. Revisa el formato e intenta nuevamente." }, { status: 500, headers: requestErrorHeaders() });
+  } finally {
+    release?.();
   }
 }
 
@@ -201,8 +209,13 @@ async function extractFileText(file: File) {
     if (buffer.subarray(0, 2).toString("ascii") !== "PK") {
       throw new DocumentProcessError("Convierte el archivo Word al formato DOCX antes de importarlo.", 415);
     }
+    assertDocxArchiveLimits(buffer);
     const mammoth = await import("mammoth");
-    const result = await mammoth.convertToHtml({ buffer });
+    const result = await mammoth.convertToHtml({ buffer }, {
+      externalFileAccess: false,
+      // Audio import does not need to inflate and embed image contents in HTML.
+      convertImage: mammoth.images.imgElement(async () => ({ src: "" })),
+    });
     return {
       text: await extractStructuredTextFromHtml(result.value),
       needsOcr: false,
@@ -243,10 +256,14 @@ async function extractPdfText(arrayBuffer: ArrayBuffer) {
     const pdf = await loadingTask.promise;
     if (pdf.numPages > 200) throw new DocumentProcessError("El PDF supera el límite de 200 páginas de esta API.", 413);
     let textLength = 0;
+    let itemCount = 0;
     for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
       const page = await pdf.getPage(pageNumber);
       try {
         const content = await page.getTextContent();
+        itemCount += content.items.length;
+        if (itemCount > MAX_PDF_TOTAL_ITEMS) throw new DocumentProcessError("El PDF contiene demasiados elementos. Divide el documento.", 413);
+        assertPdfTextItemLimits(content.items, MAX_TEXT_CHARS - textLength);
         const pageText = extractPdfPageText(content.items).trim();
         textLength += pageText.length;
         if (textLength > MAX_TEXT_CHARS) throw new DocumentProcessError("El PDF contiene demasiado texto. Divídelo en partes.", 413);
@@ -331,12 +348,12 @@ function ensurePdfRuntimePolyfills() {
   }
 }
 
-async function extractWebsiteText(url: string) {
+async function extractWebsiteText(url: string, signal?: AbortSignal) {
   const [{ Readability }, { JSDOM }] = await Promise.all([
     import("@mozilla/readability"),
     import("jsdom"),
   ]);
-  const response = await readRemote(url, { allowedContentTypes: ["text/html", "application/xhtml+xml", "text/plain"] });
+  const response = await readRemote(url, { signal, allowedContentTypes: ["text/html", "application/xhtml+xml", "text/plain"] });
 
   if (response.status < 200 || response.status >= 300) {
     throw new DocumentProcessError("No se pudo obtener el sitio web.", 502);
@@ -344,31 +361,30 @@ async function extractWebsiteText(url: string) {
 
   const html = response.body.toString("utf8");
   const dom = new JSDOM(html, { url: response.url });
-  const reader = new Readability(dom.window.document);
-  const article = reader.parse();
-  const text = article?.content
-    ? await extractStructuredTextFromHtml(article.content, url)
-    : extractStructuredTextFromElement(dom.window.document.body);
+  try {
+    const reader = new Readability(dom.window.document);
+    const article = reader.parse();
+    const text = article?.content
+      ? await extractStructuredTextFromHtml(article.content, url)
+      : extractStructuredTextFromElement(dom.window.document.body);
 
-  if (!text) {
-    throw new Error("No se encontró texto legible en el sitio web.");
-  }
-  checkTextSize(text);
+    if (!text) {
+      throw new Error("No se encontró texto legible en el sitio web.");
+    }
+    checkTextSize(text);
 
-  return {
-    title: article?.title ?? dom.window.document.title,
-    text,
-  };
+    return { title: article?.title ?? dom.window.document.title, text };
+  } finally { dom.window.close(); }
 }
 
-async function extractGoogleDocText(url: string) {
+async function extractGoogleDocText(url: string, signal?: AbortSignal) {
   const docId = getGoogleDocId(url);
   if (!docId) {
     throw new DocumentProcessError("La liga de Google Docs no tiene un identificador válido.", 400);
   }
 
   const exportUrl = `https://docs.google.com/document/d/${docId}/export?format=txt`;
-  const response = await readRemote(exportUrl, { maxBytes: 1_200_000, allowedContentTypes: ["text/plain"] });
+  const response = await readRemote(exportUrl, { signal, maxBytes: 1_200_000, allowedContentTypes: ["text/plain"] });
   if (response.status < 200 || response.status >= 300) {
     throw new Error(
       "No se pudo exportar el documento de Google. Debe estar compartido o conectarse con Google Drive.",
@@ -510,7 +526,8 @@ function isPdfTextContentItem(item: unknown): item is PdfTextContentItem {
 async function extractStructuredTextFromHtml(html: string, url?: string) {
   const { JSDOM } = await import("jsdom");
   const dom = new JSDOM(html, url ? { url } : undefined);
-  return extractStructuredTextFromElement(dom.window.document.body);
+  try { return extractStructuredTextFromElement(dom.window.document.body); }
+  finally { dom.window.close(); }
 }
 
 function extractStructuredTextFromElement(root: Element | null) {

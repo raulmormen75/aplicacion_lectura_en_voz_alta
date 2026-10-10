@@ -324,9 +324,158 @@
   overflow-wrap: anywhere;
 }
 
-.book-layout .book-page-heading span:last-child {
+.book-layout .book-page-heading span:last-child:not(:first-child) {
   flex-shrink: 0;
   font-variant-numeric: tabular-nums;
+}
+
+/* Reading preferences and temporary audio share the existing book layout. */
+.book-layout .book-page-heading h1 {
+  min-width: 0;
+  margin: 0;
+  font: inherit;
+  overflow-wrap: anywhere;
+}
+
+.book-layout .book-page-body {
+  font-size: calc(1em * var(--reader-font-scale, 1));
+}
+
+.book-layout .upload-drop:focus-within {
+  outline: 2px solid var(--gold);
+  outline-offset: 3px;
+}
+
+.book-layout .reading-settings {
+  position: fixed;
+  z-index: 90;
+  top: max(16px, env(safe-area-inset-top, 0px));
+  right: max(16px, env(safe-area-inset-right, 0px));
+  display: grid;
+  gap: 14px;
+  width: min(440px, calc(100vw - 32px));
+  max-height: calc(100dvh - 32px);
+  overflow: auto;
+  padding: 20px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--book-chrome);
+  color: var(--ivory);
+  box-shadow: 0 12px 40px #0005;
+}
+
+.book-layout .reading-settings-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+
+.book-layout .reading-settings h2 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.book-layout .reading-settings label {
+  display: grid;
+  gap: 6px;
+  font-size: 14px;
+}
+
+.book-layout :is(.reading-settings, .speed-control) select {
+  min-width: 0;
+  min-height: 40px;
+  border: 1px solid #777;
+  border-radius: 5px;
+  padding: 6px 9px;
+  background: #292b29;
+  color: #f5f5ef;
+  font: inherit;
+}
+
+.book-layout .speed-control {
+  gap: 6px;
+  font-size: 12px;
+}
+
+.book-layout .reading-settings .temporary-reading {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  line-height: 1.5;
+}
+
+.book-layout .temporary-reading input {
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+}
+
+.book-layout .reading-settings p,
+.book-layout .voice-credit p {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.book-layout .reading-settings button,
+.book-layout .reading-settings-button,
+.book-layout .focus-settings-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-width: 44px;
+  min-height: 44px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 8px;
+  background: transparent;
+  color: var(--ivory);
+}
+
+.book-layout .playback-notice {
+  position: fixed;
+  z-index: 85;
+  top: max(12px, env(safe-area-inset-top, 0px));
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: min(620px, calc(100vw - 24px));
+  padding: 12px 16px;
+  border: 1px solid #d7b777;
+  border-radius: 8px;
+  background: #302b22;
+  color: #fff4da;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.book-layout .playback-notice button {
+  flex-shrink: 0;
+  min-width: 44px;
+  min-height: 44px;
+}
+
+.book-layout .focus-controls-toggle {
+  position: fixed;
+  z-index: 60;
+  top: max(8px, env(safe-area-inset-top, 0px));
+  right: max(8px, env(safe-area-inset-right, 0px));
+  min-height: 44px;
+  padding: 8px 12px;
+  border: 1px solid #ffffff55;
+  border-radius: 6px;
+  background: var(--book-chrome);
+  color: var(--ivory);
+  font-size: 12px;
+}
+
+.book-layout .audio-pending {
+  outline: 2px dotted var(--gold);
+  outline-offset: 3px;
 }
 
 .book-layout .book-page-body {

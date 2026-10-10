@@ -14,6 +14,8 @@ import {
   RotateCcw,
   RotateCw,
   ScanText,
+  Settings2,
+  Trash2,
   SkipBack,
   SkipForward,
   Sparkles,
@@ -23,7 +25,7 @@ import {
 import Image from "next/image";
 import { flushSync } from "react-dom";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { ChangeEvent, MouseEvent } from "react";
+import type { ChangeEvent, MouseEvent, CSSProperties } from "react";
 import {
   calculatePercentage,
   cleanTextWithoutInventing,
@@ -38,11 +40,13 @@ import {
   DEFAULT_READER_STATE,
   loadReaderState,
   saveReaderState,
+  clearReaderState,
+  cancelPendingReaderSaves,
 } from "@/lib/reader/storage";
-import { synthesizePiperSpeech } from "@/lib/reader/piper";
+import { remoteSpeech, speechFragment } from "@/lib/reader/speech-buffer";
+import type { RemoteVoiceId } from "@/lib/reader/speech-buffer";
 import { buildPiperTimeline, piperWordAtTime } from "@/lib/reader/piper-timing";
 import { paginateBook, pageForWord } from "@/lib/reader/book";
-import type { PiperStage, PiperStatusUpdate } from "@/lib/reader/piper";
 import type {
   PlaybackRate,
   ReaderDocument,
@@ -79,38 +83,20 @@ type PiperWordTiming = {
   wordIndex: number;
 };
 
-type VoiceStartupState = {
-  visible: boolean;
-  status: PiperStage;
-  message: string;
-  detail?: string;
-  progress?: number;
-};
-
-type VoiceModelId = "browser-standard" | "piper-updated";
+type VoiceModelId = "browser-standard" | RemoteVoiceId;
 
 const SAMPLE_TEXT =
   "La lectura científica exige atención, ritmo y continuidad. Esta aplicación convierte documentos largos en una experiencia auditiva clara, con avance guardado, resaltado visual y controles diseñados para retomar el contenido sin perder el hilo.";
 const MAX_CLIENT_UPLOAD_BYTES = 25 * 1024 * 1024;
+const MAX_CLIENT_TEXT_CHARS = 300_000;
 const VOICE_LOAD_TIMEOUT_MS = 900;
-const STANDARD_VOICE_MODEL_ID: VoiceModelId = "browser-standard";
-const PIPER_VOICE_MODEL_ID: VoiceModelId = "piper-updated";
-const VOICE_MODELS: Array<{
-  id: VoiceModelId;
-  label: string;
-  description: string;
-}> = [
-  {
-    id: STANDARD_VOICE_MODEL_ID,
-    label: "Voz estándar",
-    description: "Usa la voz disponible en este navegador.",
-  },
-  {
-    id: PIPER_VOICE_MODEL_ID,
-    label: "Laura",
-    description: "Español de México · voz local para uso personal.",
-  },
+const STANDARD_VOICE_MODEL_ID = "browser-standard" as const;
+const VOICE_MODELS: Array<{ id: VoiceModelId; label: string; description: string }> = [
+  { id: STANDARD_VOICE_MODEL_ID, label: "Dispositivo", description: "Sin descargar modelos. Elige una voz de tu equipo." },
+  { id: "hf-mexico", label: "México · HF", description: "Chatterbox es-MX · referencia f1 · demo experimental con cola y cuota." },
+  { id: "hf-dora", label: "Dora · HF", description: "Kokoro · femenina, español · demo experimental. Acento mexicano no confirmado." },
 ];
+const PLAYBACK_RATES: PlaybackRate[] = [0.5, 0.65, 0.75, 0.85, 1, 1.25, 1.5, 2];
 
 export function ReaderApp() {
   const [state, setState] = useState<StoredReaderState>(DEFAULT_READER_STATE);
@@ -125,7 +111,11 @@ export function ReaderApp() {
   const [statusMessage, setStatusMessage] = useState("Avance guardado en este dispositivo.");
   const [importError, setImportError] = useState<string | null>(null);
   const [systemVoices, setSystemVoices] = useState<SpeechSynthesisVoice[]>([]);
-  const [voiceStartup, setVoiceStartup] = useState<VoiceStartupState | null>(null);
+  const [playbackError, setPlaybackError] = useState("");
+  const [audioPending, setAudioPending] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [temporaryReading, setTemporaryReading] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
   const [isVoiceMenuOpen, setIsVoiceMenuOpen] = useState(false);
   const [integrations, setIntegrations] = useState<IntegrationsStatus>({
     gptOssReady: false,
@@ -138,7 +128,7 @@ export function ReaderApp() {
   const focusDockRef = useRef<HTMLElement | null>(null);
   const playerDockRef = useRef<HTMLElement | null>(null);
   const readerHeaderRef = useRef<HTMLElement | null>(null);
-  const voiceDialogRef = useRef<HTMLDialogElement | null>(null);
+  const temporaryReadingRef = useRef(false);
   const storageEnabledRef = useRef(false);
   const utteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
   const activeSegmentRef = useRef<{
@@ -146,23 +136,24 @@ export function ReaderApp() {
     endWord: number;
     rate: PlaybackRate;
     textToSpeak?: string;
+    voiceModel?: VoiceModelId;
   } | null>(null);
   const intervalRef = useRef<number | null>(null);
-  const piperProgressFrameRef = useRef<number | null>(null);
-  const piperWordTimelineRef = useRef<PiperWordTiming[]>([]);
+  const audioProgressFrameRef = useRef<number | null>(null);
+  const audioWordTimelineRef = useRef<PiperWordTiming[]>([]);
   const activeWordRef = useRef<HTMLSpanElement | null>(null);
   const playbackSessionRef = useRef(0);
   const shouldContinuePlaybackRef = useRef(false);
   const progressWordRef = useRef(0);
   const boundarySeenRef = useRef(false);
-  const piperAudioRef = useRef<HTMLAudioElement | null>(null);
-  const piperAudioUrlRef = useRef<string | null>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const audioUrlRef = useRef<string | null>(null);
 
   const document = state.document;
   const hasDocument = Boolean(document);
   const preferences = state.preferences;
   const selectedVoiceModel: VoiceModelId =
-    preferences.voiceId === PIPER_VOICE_MODEL_ID ? PIPER_VOICE_MODEL_ID : STANDARD_VOICE_MODEL_ID;
+    preferences.voiceId === "hf-mexico" || preferences.voiceId === "hf-dora" ? preferences.voiceId : STANDARD_VOICE_MODEL_ID;
   const selectedVoiceModelRef = useRef<VoiceModelId>(selectedVoiceModel);
   const playbackRateRef = useRef<PlaybackRate>(preferences.rate);
   const shouldShowTextReview =
@@ -175,44 +166,43 @@ export function ReaderApp() {
     }
   }, []);
 
-  const clearPiperProgressTracker = useCallback(() => {
-    if (piperProgressFrameRef.current) {
-      window.cancelAnimationFrame(piperProgressFrameRef.current);
-      piperProgressFrameRef.current = null;
+  const clearAudioProgressTracker = useCallback(() => {
+    if (audioProgressFrameRef.current) {
+      window.cancelAnimationFrame(audioProgressFrameRef.current);
+      audioProgressFrameRef.current = null;
     }
   }, []);
 
-  const stopPiperAudio = useCallback(() => {
-    clearPiperProgressTracker();
-    if (piperAudioRef.current) {
-      piperAudioRef.current.onended = null;
-      piperAudioRef.current.onerror = null;
-      piperAudioRef.current.pause();
+  const stopAudio = useCallback(() => {
+    clearAudioProgressTracker();
+    if (audioRef.current) {
+      audioRef.current.onended = null;
+      audioRef.current.onerror = null;
+      audioRef.current.pause();
     }
-    piperAudioRef.current = null;
-    piperWordTimelineRef.current = [];
+    audioRef.current = null;
+    audioWordTimelineRef.current = [];
 
-    if (piperAudioUrlRef.current) {
-      URL.revokeObjectURL(piperAudioUrlRef.current);
-      piperAudioUrlRef.current = null;
+    if (audioUrlRef.current) {
+      URL.revokeObjectURL(audioUrlRef.current);
+      audioUrlRef.current = null;
     }
-  }, [clearPiperProgressTracker]);
+  }, [clearAudioProgressTracker]);
 
   const stopPlayback = useCallback(
-    (advanceSession = true) => {
+    (advanceSession = true, cancelPrefetch = true) => {
       shouldContinuePlaybackRef.current = false;
       if (advanceSession) playbackSessionRef.current += 1;
       voiceAbortRef.current?.abort();
       voiceAbortRef.current = null;
-      prefetchAbortRef.current?.abort();
-      prefetchAbortRef.current = null;
+      if (cancelPrefetch) { prefetchAbortRef.current?.abort(); prefetchAbortRef.current = null; }
       window.speechSynthesis?.cancel();
-      stopPiperAudio();
+      stopAudio();
       clearProgressTimer();
       activeSegmentRef.current = null;
-      setVoiceStartup(null);
+      setAudioPending(false);
     },
-    [clearProgressTimer, stopPiperAudio],
+    [clearProgressTimer, stopAudio],
   );
 
   const tokens = useMemo(
@@ -267,11 +257,16 @@ export function ReaderApp() {
     let mounted = true;
     void loadReaderState().then((result) => {
       if (!mounted) return;
-      setState(result.state);
+      const restored = result.state;
+      if (restored.preferences.voiceId === "piper-updated") restored.preferences.voiceId = STANDARD_VOICE_MODEL_ID;
+      setState(restored);
       storageEnabledRef.current = result.ok;
       setStorageWarning(result.ok ? "" : result.error);
       setIsHydrated(true);
     });
+
+    // Remove the model cached by the previous version. App shell caching remains independent.
+    if ("caches" in window) void caches.delete("reader-piper-laura-v1").catch(() => undefined);
 
     const refreshVoices = () => setSystemVoices(window.speechSynthesis?.getVoices?.() ?? []);
     refreshVoices();
@@ -290,10 +285,11 @@ export function ReaderApp() {
       window.speechSynthesis?.removeEventListener?.("voiceschanged", refreshVoices);
       mounted = false;
       processingAbortRef.current?.abort();
-      stopPiperAudio();
+      stopAudio();
       stopPlayback();
+      remoteSpeech.clear();
     };
-  }, [stopPiperAudio, stopPlayback]);
+  }, [stopAudio, stopPlayback]);
 
   useEffect(() => {
     selectedVoiceModelRef.current = selectedVoiceModel;
@@ -326,11 +322,6 @@ export function ReaderApp() {
       root.style.removeProperty("--reader-header-height");
     };
   }, [hasDocument, preferences.readingMode, isHydrated]);
-
-  useEffect(() => {
-    const dialog = voiceDialogRef.current;
-    if (voiceStartup?.visible && dialog && !dialog.open) dialog.showModal();
-  }, [voiceStartup?.visible]);
 
   useEffect(() => {
     let revealTimer: number | null = null;
@@ -472,7 +463,7 @@ export function ReaderApp() {
   }, [isHydrated, preferences.readingMode]);
 
   useEffect(() => {
-    if (!isHydrated || !storageEnabledRef.current) return;
+    if (!isHydrated || !storageEnabledRef.current || temporaryReadingRef.current) return;
     let active = true;
     void saveReaderState({
       ...state,
@@ -487,7 +478,7 @@ export function ReaderApp() {
       else if (active && result.ok) setStorageWarning("");
     });
     return () => { active = false; };
-  }, [isHydrated, percentage, remainingSeconds, state]);
+  }, [isHydrated, percentage, remainingSeconds, state, temporaryReading]);
 
   function updatePreferences(next: Partial<ReaderPreferences>) {
     setState((current) => ({
@@ -501,8 +492,10 @@ export function ReaderApp() {
 
   function setDocument(nextDocument: ReaderDocument) {
     setImportError(null);
-    storageEnabledRef.current = true;
+    storageEnabledRef.current = !temporaryReadingRef.current;
     stopPlayback();
+    remoteSpeech.clear();
+    setPlaybackError("");
     setIsPlaying(false);
     setImportOpen(false);
 
@@ -595,6 +588,7 @@ export function ReaderApp() {
     if (processingAbortRef.current) return;
     setImportError(null);
     if (!pastedText.trim()) { setImportError("Pega texto antes de continuar."); return; }
+    if (pastedText.length > MAX_CLIENT_TEXT_CHARS) { setImportError("El texto supera 300.000 caracteres. Divídelo en secciones para leerlo."); return; }
     setStatusMessage("Limpiando texto pegado.");
     try {
       const prepared = createDocumentFromText({source: "pastedText", title: "Texto pegado", sourceLabel: "Texto pegado", text: pastedText, ocrAvailable: false});
@@ -674,9 +668,12 @@ export function ReaderApp() {
 
   function getPreferredSystemVoice(voices = getAvailableSpeechVoices()) {
     const availableVoices = voices;
+    const manual = availableVoices.find(voice => voice.voiceURI === preferences.systemVoiceURI);
+    if (manual) return manual;
     if (!availableVoices.length) return undefined;
 
-    const documentLanguage = document?.detectedLanguage === "en" ? "en" : "es";
+    const documentLanguage = preferences.language === "auto" || !preferences.language
+      ? document?.detectedLanguage === "en" ? "en" : "es" : preferences.language;
     const regionalLocale = documentLanguage === "en" ? "en-GB" : "es-MX";
     const exactRegionalVoices = availableVoices.filter((item) => item.lang === regionalLocale);
     const languageVoices = availableVoices.filter((item) =>
@@ -709,6 +706,7 @@ export function ReaderApp() {
 
     return (
       (documentLanguage === "es" ? mexicanNaturalVoice : britishNaturalVoice) ??
+      exactRegionalVoices.find(item => /dalia|sabina|paulina|helena|monica|mónica|sonia|libby/i.test(item.name)) ??
       browserDefaultVoice ??
       naturalRegionalVoice ??
       exactRegionalVoices[0] ??
@@ -717,7 +715,7 @@ export function ReaderApp() {
       latinSpanishVoices[0] ??
       (documentLanguage === "en"
         ? languageVoices.find((item) => item.default) ?? languageVoices[0]
-        : undefined)
+        : languageVoices.find(item => /female|mujer|monica|mónica|helena|paulina/i.test(item.name)) ?? languageVoices.find(item => item.default) ?? languageVoices[0])
     );
   }
 
@@ -776,27 +774,15 @@ export function ReaderApp() {
     if (!chunk || safeFromWord >= document.wordCount) return null;
 
     const chunkTokens = tokenizeWords(chunk.cleanText);
-    const localStartWord = Math.max(0, safeFromWord - chunk.startWord);
-    const startChar = chunkTokens[localStartWord]?.start ?? 0;
-    let localEndWord = chunkTokens.length;
-    if (voiceModel === PIPER_VOICE_MODEL_ID) {
-      localEndWord = Math.min(localStartWord + 40, chunkTokens.length);
-      // Prefer a sentence ending while keeping startup synthesis small.
-      for (let index = localEndWord - 1; index >= localStartWord + 12; index--) {
-        const after = chunk.cleanText.slice(chunkTokens[index].end, chunkTokens[index + 1]?.start ?? chunk.cleanText.length);
-        if (/[.!?]/u.test(after) || /[.!?]$/u.test(chunkTokens[index].text)) { localEndWord = index + 1; break; }
-      }
+    if (voiceModel !== STANDARD_VOICE_MODEL_ID) {
+      const fragment = speechFragment(chunk, chunkTokens, safeFromWord, voiceModel);
+      return fragment ? { chunk, ...fragment } : null;
     }
-    const endChar = chunkTokens[localEndWord]?.start ?? chunk.cleanText.length;
-    const textToSpeak = chunk.cleanText.slice(startChar, endChar).trim();
-    const speechBaseWord = chunk.startWord + localStartWord;
-    const chunkEndWord = Math.min(chunk.startWord + localEndWord, document.wordCount);
-
+    const localStart = Math.max(0, safeFromWord - chunk.startWord);
     return {
-      chunk,
-      textToSpeak,
-      speechBaseWord,
-      chunkEndWord,
+      chunk, textToSpeak: chunk.cleanText.slice(chunkTokens[localStart]?.start ?? 0).trim(),
+      speechBaseWord: safeFromWord, chunkEndWord: chunk.startWord + chunk.wordCount,
+      resumeWord: safeFromWord,
     };
   }
 
@@ -804,7 +790,7 @@ export function ReaderApp() {
     clearProgressTimer();
     progressWordRef.current = startWord;
     const fallbackStartsAt = window.Date.now() + 1800;
-    const wordsPerSecond = (105 * rate) / 60;
+    const wordsPerSecond = (155 * rate) / 60;
     const intervalMs = Math.max(650, Math.round(1000 / wordsPerSecond));
 
     intervalRef.current = window.setInterval(() => {
@@ -824,7 +810,7 @@ export function ReaderApp() {
     }, intervalMs);
   }
 
-  function startPiperProgressTracker(
+  function startAudioProgressTracker(
     audio: HTMLAudioElement,
     startWord: number,
     endWord: number,
@@ -832,12 +818,12 @@ export function ReaderApp() {
     textToSpeak?: string,
   ) {
     clearProgressTimer();
-    clearPiperProgressTracker();
+    clearAudioProgressTracker();
 
     const tick = () => {
       if (
         playbackSessionRef.current !== activeSession ||
-        piperAudioRef.current !== audio ||
+        audioRef.current !== audio ||
         audio.paused ||
         audio.ended
       ) {
@@ -846,8 +832,8 @@ export function ReaderApp() {
 
       const hasDuration = Number.isFinite(audio.duration) && audio.duration > 0;
       if (hasDuration) {
-        if (piperWordTimelineRef.current.length === 0) {
-          piperWordTimelineRef.current = buildPiperTimeline(
+        if (audioWordTimelineRef.current.length === 0) {
+          audioWordTimelineRef.current = buildPiperTimeline(
             tokenizeWords(textToSpeak ?? "").slice(0, endWord - startWord),
             startWord,
             audio.duration,
@@ -855,19 +841,19 @@ export function ReaderApp() {
         }
 
         const nextWord = piperWordAtTime(
-          piperWordTimelineRef.current,
+          audioWordTimelineRef.current,
           audio.currentTime,
           startWord,
         );
-        if (nextWord > progressWordRef.current) {
+        if (nextWord !== progressWordRef.current) {
           updateProgress(nextWord);
         }
       }
 
-      piperProgressFrameRef.current = window.requestAnimationFrame(tick);
+      audioProgressFrameRef.current = window.requestAnimationFrame(tick);
     };
 
-    piperProgressFrameRef.current = window.requestAnimationFrame(tick);
+    audioProgressFrameRef.current = window.requestAnimationFrame(tick);
   }
 
   async function startSpeech(
@@ -879,6 +865,9 @@ export function ReaderApp() {
     if (!document) return;
 
     playbackRateRef.current = rate;
+    const retainedSegment = activeSegmentRef.current;
+    if (sessionId === undefined && audioRef.current && retainedSegment?.voiceModel === voiceModel &&
+      fromWord >= retainedSegment.startWord && fromWord < retainedSegment.endWord && seekPreparedAudio(fromWord, true)) return;
     const activeSession = sessionId ?? playbackSessionRef.current + 1;
     playbackSessionRef.current = activeSession;
     shouldContinuePlaybackRef.current = true;
@@ -886,14 +875,22 @@ export function ReaderApp() {
     if (!sessionId) {
       window.speechSynthesis?.cancel();
       clearProgressTimer();
-      clearPiperProgressTracker();
+      clearAudioProgressTracker();
+      voiceAbortRef.current?.abort();
+      stopAudio();
     }
 
-    const speechWindow = getSpeechWindow(fromWord, voiceModel);
+    let speechWindow;
+    try { speechWindow = getSpeechWindow(fromWord, voiceModel); } catch (error) {
+      setPlaybackError(error instanceof Error ? error.message : "No se pudo preparar el fragmento.");
+      selectedVoiceModelRef.current = STANDARD_VOICE_MODEL_ID;
+      updatePreferences({ voiceId: STANDARD_VOICE_MODEL_ID });
+      void startSpeech(fromWord, activeSession, rate, STANDARD_VOICE_MODEL_ID); return;
+    }
     if (!speechWindow) {
       clearProgressTimer();
       setIsPlaying(false);
-      setStatusMessage("Lectura terminada. Tu avance quedó guardado.");
+      setStatusMessage("Lectura terminada.");
       return;
     }
 
@@ -904,18 +901,14 @@ export function ReaderApp() {
       return;
     }
 
-    updateProgress(speechBaseWord);
-    if (voiceModel === PIPER_VOICE_MODEL_ID) {
-      await startPiperSpeech({
-        textToSpeak,
-        speechBaseWord,
-        chunkEndWord,
-        activeSession,
-        rate,
-        voiceModel,
-        showStartup: sessionId === undefined,
-      });
+    updateProgress(fromWord);
+    setPlaybackError("");
+    if (voiceModel !== STANDARD_VOICE_MODEL_ID) {
+      await startRemoteSpeech({ textToSpeak, speechBaseWord, chunkEndWord, activeSession, rate, voiceModel, resumeWord: fromWord });
       return;
+    }
+    if (!("speechSynthesis" in window) || !("SpeechSynthesisUtterance" in window)) {
+      setIsPlaying(false); setPlaybackError("Este navegador no ofrece voces del dispositivo. Prueba una demo de Hugging Face."); return;
     }
 
     setIsPlaying(true);
@@ -947,19 +940,19 @@ export function ReaderApp() {
   }) {
     const utterance = new SpeechSynthesisUtterance(params.textToSpeak);
     const preferredSystemVoice = params.preferredSystemVoice;
-    const utteranceLanguage =
-      preferredSystemVoice?.lang ?? (document?.detectedLanguage === "en" ? "en-GB" : "es-US");
+    const utteranceLanguage = preferredSystemVoice?.lang ?? ((preferences.language === "en" || (preferences.language !== "es" && document?.detectedLanguage === "en")) ? "en-GB" : "es-MX");
 
     if (preferredSystemVoice) utterance.voice = preferredSystemVoice;
     utterance.lang = utteranceLanguage;
     utterance.rate = params.rate;
-    utterance.pitch = document?.detectedLanguage === "en" ? 1 : 1.02;
+    utterance.pitch = 1;
     boundarySeenRef.current = false;
     activeSegmentRef.current = {
       startWord: params.speechBaseWord,
       endWord: params.chunkEndWord,
       rate: params.rate,
       textToSpeak: params.textToSpeak,
+      voiceModel: params.voiceModel,
     };
 
     utterance.onboundary = (event) => {
@@ -987,14 +980,15 @@ export function ReaderApp() {
       }
 
       setIsPlaying(false);
-      setStatusMessage("Lectura terminada. Tu avance quedó guardado.");
+      setStatusMessage("Lectura terminada.");
     };
     utterance.onerror = () => {
       if (playbackSessionRef.current !== params.activeSession) return;
       clearProgressTimer();
       setIsPlaying(false);
       shouldContinuePlaybackRef.current = false;
-      setStatusMessage("La voz del navegador se interrumpió. Intenta reproducir de nuevo.");
+      setStatusMessage("La voz del navegador se interrumpió.");
+      setPlaybackError("La voz del dispositivo se interrumpió. Puedes elegir otra voz y reanudar.");
     };
 
     utteranceRef.current = utterance;
@@ -1012,239 +1006,139 @@ export function ReaderApp() {
     );
   }
 
-  async function startPiperSpeech(params: {
-    textToSpeak: string;
-    speechBaseWord: number;
-    chunkEndWord: number;
-    activeSession: number;
-    rate: PlaybackRate;
-    voiceModel: VoiceModelId;
-    showStartup: boolean;
+  async function startRemoteSpeech(params: {
+    textToSpeak: string; speechBaseWord: number; chunkEndWord: number; activeSession: number;
+    rate: PlaybackRate; voiceModel: RemoteVoiceId; resumeWord: number;
   }) {
     window.speechSynthesis?.cancel();
-    stopPiperAudio();
-    setIsPlaying(false);
-    setStatusMessage("Preparando a Laura.");
-    if (params.showStartup) updateVoiceStartupStatus({
-      stage: "preparing",
-      message: "Preparando a Laura",
-      detail: "Preparando la voz en este dispositivo.",
-    });
-
-    let acceptingStatus = true;
+    stopAudio();
+    setIsPlaying(true);
+    setAudioPending(true);
     const controller = new AbortController();
     voiceAbortRef.current?.abort();
     voiceAbortRef.current = controller;
     try {
-      console.info("[Piper TTS] Inicio de lectura", {
-        documentId: document?.id,
-        title: document?.title,
-        fromWord: params.speechBaseWord,
-        words: countWords(params.textToSpeak),
-      });
-
-      const result = await synthesizePiperSpeech({
-        signal: controller.signal,
-        text: params.textToSpeak,
-        onStatus: (update) => {
-          if (params.showStartup && acceptingStatus && playbackSessionRef.current === params.activeSession) updateVoiceStartupStatus(update);
-        },
-      });
-      acceptingStatus = false;
-
-      if (playbackSessionRef.current !== params.activeSession) return;
-
-      console.info("[Piper TTS] Audio generado", {
-        engine: "piper",
-        initMs: Math.round(result.initMs),
-        generationMs: Math.round(result.generationMs),
-        bytes: result.audio.size,
-      });
-
-      if (params.showStartup) updateVoiceStartupStatus({
-        stage: "playing",
-        message: "Laura está lista",
-        detail: "Iniciando el audio.",
-      });
-      await startPiperAudioPlayback(params, result.audio);
+      const audio = await remoteSpeech.synthesize({ voice: params.voiceModel, text: params.textToSpeak, signal: controller.signal });
+      if (playbackSessionRef.current !== params.activeSession || controller.signal.aborted) return;
+      await startAudioPlayback(params, audio);
     } catch (error) {
-      acceptingStatus = false;
-      if (controller.signal.aborted) return;
-      await fallbackToBrowserVoice(params, error);
+      if (!controller.signal.aborted) await fallbackToBrowserVoice(params, error);
     } finally {
-      if (voiceAbortRef.current === controller) voiceAbortRef.current = null;
+      if (voiceAbortRef.current === controller) { voiceAbortRef.current = null; setAudioPending(false); }
     }
   }
 
-  async function startPiperAudioPlayback(
-    params: {
-      textToSpeak: string;
-      speechBaseWord: number;
-      chunkEndWord: number;
-      activeSession: number;
-      rate: PlaybackRate;
-      voiceModel: VoiceModelId;
-    },
-    audioBlob: Blob,
-  ) {
-    stopPiperAudio();
-    // Decode locally to exclude silent regions from the estimated word clock.
+  async function startAudioPlayback(params: {
+    textToSpeak: string; speechBaseWord: number; chunkEndWord: number; activeSession: number;
+    rate: PlaybackRate; voiceModel: RemoteVoiceId; resumeWord: number;
+  }, audioBlob: Blob) {
+    stopAudio();
     let timeline: PiperWordTiming[] = [];
     try {
-      const decoder = new OfflineAudioContext(1, 1, 22050);
+      const decoder = new OfflineAudioContext(1, 1, 24000);
       const buffer = await decoder.decodeAudioData(await audioBlob.arrayBuffer());
-      timeline = buildPiperTimeline(
-        tokenizeWords(params.textToSpeak).slice(0, params.chunkEndWord - params.speechBaseWord),
-        params.speechBaseWord, buffer.duration, buffer.getChannelData(0), buffer.sampleRate,
-      );
-    } catch (error) {
-      console.warn("[Piper TTS] Acoustic timing unavailable; using duration estimate", error);
-    }
+      timeline = buildPiperTimeline(tokenizeWords(params.textToSpeak), params.speechBaseWord,
+        buffer.duration, buffer.getChannelData(0), buffer.sampleRate);
+    } catch { /* Duration-only timing remains available after metadata loads. */ }
     if (playbackSessionRef.current !== params.activeSession) return;
-    piperWordTimelineRef.current = timeline;
-    const audioUrl = URL.createObjectURL(audioBlob);
-    const audio = new Audio(audioUrl);
+    const objectUrl = URL.createObjectURL(audioBlob);
+    const audio = new Audio(objectUrl);
     audio.playbackRate = playbackRateRef.current;
-    piperAudioUrlRef.current = audioUrl;
-    piperAudioRef.current = audio;
+    audioUrlRef.current = objectUrl;
+    audioRef.current = audio;
+    audioWordTimelineRef.current = timeline;
     utteranceRef.current = null;
-    boundarySeenRef.current = false;
-    activeSegmentRef.current = {
-      startWord: params.speechBaseWord,
-      endWord: params.chunkEndWord,
-      rate: playbackRateRef.current,
-      textToSpeak: params.textToSpeak,
-    };
-
-    const cleanup = () => {
-      if (piperAudioRef.current === audio) piperAudioRef.current = null;
-      piperWordTimelineRef.current = [];
-      if (piperAudioUrlRef.current === audioUrl) {
-        URL.revokeObjectURL(audioUrl);
-        piperAudioUrlRef.current = null;
-      }
-    };
-
+    activeSegmentRef.current = { startWord: params.speechBaseWord, endWord: params.chunkEndWord,
+      rate: playbackRateRef.current, textToSpeak: params.textToSpeak, voiceModel: params.voiceModel };
     audio.onended = () => {
-      if (playbackSessionRef.current !== params.activeSession || piperAudioRef.current !== audio) return;
-      cleanup();
-      clearProgressTimer();
-      clearPiperProgressTracker();
-      if (playbackSessionRef.current !== params.activeSession) return;
-
-      updateProgress(Math.max(progressWordRef.current, params.chunkEndWord));
-
+      if (playbackSessionRef.current !== params.activeSession || audioRef.current !== audio) return;
+      stopAudio(); updateProgress(params.chunkEndWord);
       if (shouldContinuePlaybackRef.current && document && params.chunkEndWord < document.wordCount) {
-        void startSpeech(
-          params.chunkEndWord,
-          params.activeSession,
-          playbackRateRef.current,
-          params.voiceModel,
-        );
-        return;
-      }
-
-      setIsPlaying(false);
-      setStatusMessage("Lectura terminada. Tu avance quedÃ³ guardado.");
+        void startSpeech(params.chunkEndWord, params.activeSession, playbackRateRef.current, params.voiceModel);
+      } else { setIsPlaying(false); setStatusMessage("Lectura terminada."); }
     };
-
     audio.onerror = () => {
-      if (playbackSessionRef.current !== params.activeSession || piperAudioRef.current !== audio) return;
-      cleanup();
-      clearProgressTimer();
-      clearPiperProgressTracker();
-      if (playbackSessionRef.current !== params.activeSession) return;
-      void fallbackToBrowserVoice(
-        params,
-        new Error("El navegador no pudo reproducir el audio generado por Piper."),
-      );
+      if (playbackSessionRef.current === params.activeSession && audioRef.current === audio) {
+        void fallbackToBrowserVoice({ ...params, resumeWord: progressWordRef.current }, new Error("No se pudo reproducir el audio de la demo."));
+      }
     };
-
-    updateProgress(params.speechBaseWord);
-    await audio.play();
-    if (playbackSessionRef.current !== params.activeSession || piperAudioRef.current !== audio) {
-      audio.pause();
-      return;
-    }
-    startPiperProgressTracker(
-      audio,
-      params.speechBaseWord,
-      params.chunkEndWord,
-      params.activeSession,
-      params.textToSpeak,
-    );
-    setVoiceStartup(null);
+    // The audio is already decoded above; seek to the requested word before starting.
+    const position = timeline.find(item => item.wordIndex >= params.resumeWord)?.startsAt ?? 0;
+    if (position > 0) audio.currentTime = position;
+    try { await audio.play(); } catch (error) { stopAudio(); throw error; }
+    if (playbackSessionRef.current !== params.activeSession || audioRef.current !== audio) { audio.pause(); return; }
+    updateProgress(params.resumeWord);
     setIsPlaying(true);
-    setStatusMessage("Reproduciendo con Laura.");
-    const next = getSpeechWindow(params.chunkEndWord, PIPER_VOICE_MODEL_ID);
-    if (next && shouldContinuePlaybackRef.current) {
-      prefetchAbortRef.current?.abort();
-      const controller = new AbortController();
-      prefetchAbortRef.current = controller;
-      // Use the engine's bounded in-memory cache; do not retain document audio on a server.
-      void synthesizePiperSpeech({ text: next.textToSpeak, signal: controller.signal })
-        .catch(error => { if (!controller.signal.aborted) console.warn("[Piper TTS] Preparación anticipada no disponible", error); })
-        .finally(() => { if (prefetchAbortRef.current === controller) prefetchAbortRef.current = null; });
+    setAudioPending(false);
+    startAudioProgressTracker(audio, params.speechBaseWord, params.chunkEndWord, params.activeSession, params.textToSpeak);
+    setStatusMessage(`Reproduciendo con ${VOICE_MODELS.find(item => item.id === params.voiceModel)?.label}. Resaltado aproximado.`);
+    prefetchAdjacentAudio(params.chunkEndWord, params.voiceModel);
+  }
+
+  function prefetchAdjacentAudio(fromWord: number, voiceModel: RemoteVoiceId) {
+    prefetchAbortRef.current?.abort();
+    const controller = new AbortController();
+    prefetchAbortRef.current = controller;
+    const first = getSpeechWindow(fromWord, voiceModel);
+    const nextParagraph = paragraphNavigationTargets.find(block => block.startWord > fromWord)?.startWord;
+    const targets = [first, first ? getSpeechWindow(first.chunkEndWord, voiceModel) : null,
+      nextParagraph !== undefined ? getSpeechWindow(nextParagraph, voiceModel) : null];
+    const seen = new Set<string>();
+    for (const target of targets) {
+      if (!target || seen.has(target.textToSpeak)) continue;
+      seen.add(target.textToSpeak);
+      void remoteSpeech.synthesize({ voice: voiceModel, text: target.textToSpeak, signal: controller.signal, priority: "prefetch" }).catch(() => undefined);
     }
   }
 
-  async function fallbackToBrowserVoice(
-    params: {
-      textToSpeak: string;
-      speechBaseWord: number;
-      chunkEndWord: number;
-      activeSession: number;
-      rate: PlaybackRate;
-      voiceModel: VoiceModelId;
-    },
-    cause: unknown,
-  ) {
-    if (playbackSessionRef.current !== params.activeSession) return;
-
-    const errorMessage = cause instanceof Error ? cause.message : String(cause);
-    console.warn("[Piper TTS] Error, usando voz estándar", {
-      engine: "speechSynthesis",
-      error: errorMessage,
-    });
-
-    updateVoiceStartupStatus({
-      stage: "fallback",
-      message: "Error, usando voz estándar",
-      detail: errorMessage,
-    });
-
-    const availableVoices = await waitForSpeechVoices();
-    if (playbackSessionRef.current !== params.activeSession) return;
-
-    setVoiceStartup(null);
-    const preferredSystemVoice = getPreferredSystemVoice(availableVoices);
-    startBrowserSpeech({
-      ...params,
-      rate: playbackRateRef.current,
-      voiceModel: STANDARD_VOICE_MODEL_ID,
-      preferredSystemVoice,
-      statusMessage: "Laura no pudo iniciar. Se usó Voz estándar.",
-    });
+  function seekPreparedAudio(word: number, resume = false) {
+    const audio = audioRef.current;
+    const segment = activeSegmentRef.current;
+    if (!audio || !segment || word < segment.startWord || word >= segment.endWord) return false;
+    const timing = audioWordTimelineRef.current.find(item => item.wordIndex >= word);
+    if (!timing) return false;
+    audio.currentTime = timing.startsAt;
+    updateProgress(word);
+    if (resume && audio.paused) {
+      const session = playbackSessionRef.current;
+      void audio.play().then(() => {
+        if (playbackSessionRef.current !== session || audioRef.current !== audio) return;
+        shouldContinuePlaybackRef.current = true; setIsPlaying(true);
+        startAudioProgressTracker(audio, segment.startWord, segment.endWord, session, segment.textToSpeak);
+      }).catch(() => { stopAudio(); setIsPlaying(false); setPlaybackError("No se pudo reanudar el audio. Pulsa reproducir para continuar."); });
+    }
+    return true;
   }
 
-  function updateVoiceStartupStatus(update: PiperStatusUpdate) {
-    console.info("[Piper TTS] Estado", update);
-    setVoiceStartup({
-      visible: true,
-      status: update.stage,
-      message: update.message,
-      detail: update.detail,
-      progress: update.progress,
-    });
+  async function fallbackToBrowserVoice(params: {
+    textToSpeak: string; speechBaseWord: number; chunkEndWord: number; activeSession: number;
+    rate: PlaybackRate; voiceModel: VoiceModelId; resumeWord?: number;
+  }, cause: unknown) {
+    if (playbackSessionRef.current !== params.activeSession) return;
+    // Clear failed audio before routing pause/resume to speechSynthesis.
+    stopAudio(); prefetchAbortRef.current?.abort(); setAudioPending(false);
+    selectedVoiceModelRef.current = STANDARD_VOICE_MODEL_ID;
+    updatePreferences({ voiceId: STANDARD_VOICE_MODEL_ID });
+    setPlaybackError(`${cause instanceof Error ? cause.message : "La demo no está disponible."} Se cambió a Dispositivo.`);
+    if (!("speechSynthesis" in window)) { setIsPlaying(false); return; }
+    const voices = await waitForSpeechVoices();
+    if (playbackSessionRef.current !== params.activeSession) return;
+    const from = params.resumeWord ?? progressWordRef.current;
+    const fallback = getSpeechWindow(from, STANDARD_VOICE_MODEL_ID);
+    if (!fallback) { setIsPlaying(false); return; }
+    startBrowserSpeech({ ...params, ...fallback, voiceModel: STANDARD_VOICE_MODEL_ID,
+      rate: playbackRateRef.current, preferredSystemVoice: getPreferredSystemVoice(voices),
+      statusMessage: "Lectura con voz del dispositivo." });
   }
 
   function togglePlayback() {
     if (!document) return;
 
     if (isPlaying) {
-      if (piperAudioRef.current && !piperAudioRef.current.paused) {
-        piperAudioRef.current.pause();
-        clearPiperProgressTracker();
+      if (audioPending) { stopPlayback(); setIsPlaying(false); return; }
+      if (audioRef.current && !audioRef.current.paused) {
+        audioRef.current.pause();
+        clearAudioProgressTracker();
       } else {
         window.speechSynthesis.pause();
       }
@@ -1254,19 +1148,19 @@ export function ReaderApp() {
       return;
     }
 
-    if (piperAudioRef.current?.paused && !piperAudioRef.current.ended) {
-      if (selectedVoiceModelRef.current !== PIPER_VOICE_MODEL_ID) {
-        stopPiperAudio();
+    if (audioRef.current?.paused && !audioRef.current.ended) {
+      if (activeSegmentRef.current?.voiceModel !== selectedVoiceModelRef.current) {
+        stopAudio();
       } else {
         shouldContinuePlaybackRef.current = true;
-        const audio = piperAudioRef.current;
+        const audio = audioRef.current;
         const session = playbackSessionRef.current;
         void audio
           .play()
           .then(() => {
-            if (playbackSessionRef.current !== session || piperAudioRef.current !== audio) return;
+            if (playbackSessionRef.current !== session || audioRef.current !== audio) return;
             const activeSegment = activeSegmentRef.current;
-            startPiperProgressTracker(
+            startAudioProgressTracker(
               audio,
               activeSegment?.startWord ?? currentWord,
               Math.min(activeSegment?.endWord ?? document.wordCount, document.wordCount),
@@ -1274,22 +1168,22 @@ export function ReaderApp() {
               activeSegment?.textToSpeak,
             );
             setIsPlaying(true);
-            setStatusMessage("Audio reanudado con Laura.");
+            setStatusMessage("Audio reanudado.");
           })
           .catch((error: unknown) => {
-            if (playbackSessionRef.current !== session || piperAudioRef.current !== audio) return;
-            setIsPlaying(false);
-            setStatusMessage(
+            if (playbackSessionRef.current !== session || audioRef.current !== audio) return;
+            stopAudio(); setIsPlaying(false);
+            setPlaybackError(
               error instanceof Error
-                ? `No se pudo reanudar a Laura: ${error.message}`
-                : "No se pudo reanudar a Laura.",
+                ? `No se pudo reanudar el audio: ${error.message}`
+                : "No se pudo reanudar el audio.",
             );
           });
         return;
       }
     }
 
-    if (window.speechSynthesis.paused && utteranceRef.current) {
+    if (window.speechSynthesis?.paused && utteranceRef.current) {
       shouldContinuePlaybackRef.current = true;
       window.speechSynthesis.resume();
       const chunk = getChunkForWord(currentWord);
@@ -1307,11 +1201,20 @@ export function ReaderApp() {
 
   function seek(seconds: number) {
     if (!document) return;
+    const audio = audioRef.current;
+    if (audio && Number.isFinite(audio.duration)) {
+      const targetTime = Math.max(0, Math.min(audio.duration - 0.01, audio.currentTime + seconds));
+      if (targetTime > 0 && targetTime < audio.duration - 0.01) {
+        audio.currentTime = targetTime;
+        updateProgress(piperWordAtTime(audioWordTimelineRef.current, targetTime, activeSegmentRef.current?.startWord ?? currentWord));
+        return;
+      }
+    }
     const wasPlaying = isPlaying;
     const wordsToMove = Math.round(((155 * preferences.rate) / 60) * seconds);
     const nextWord = Math.max(0, Math.min(document.wordCount, currentWord + wordsToMove));
 
-    stopPlayback();
+    stopPlayback(true, false);
     updateProgress(nextWord);
     setIsPlaying(false);
 
@@ -1364,7 +1267,8 @@ export function ReaderApp() {
           currentWord > target.startWord &&
           currentWord < target.startWord + target.wordCount,
       );
-    stopPlayback();
+    if (seekPreparedAudio(targetWord, wasPlaying)) return;
+    stopPlayback(true, false);
     updateProgress(targetWord);
     setIsPlaying(false);
     setStatusMessage(
@@ -1421,7 +1325,8 @@ export function ReaderApp() {
     if (targetWord === currentWord) return;
 
     const wasPlaying = isPlaying;
-    stopPlayback();
+    if (seekPreparedAudio(targetWord, wasPlaying)) return;
+    stopPlayback(true, false);
     if (direction < 0 && !globalThis.document.querySelector(`.document-text .word[data-word-index="${targetWord}"]`)) {
       // Render the preceding page before measuring its last visual line.
       flushSync(() => updateProgress(targetWord));
@@ -1444,7 +1349,8 @@ export function ReaderApp() {
     const target = bookPages[spreadStart + direction * spreadSize];
     if (!target) return;
     const wasPlaying = isPlaying;
-    stopPlayback();
+    if (seekPreparedAudio(target.startWord, wasPlaying)) return;
+    stopPlayback(true, false);
     updateProgress(target.startWord);
     setIsPlaying(false);
     if (wasPlaying) void startSpeech(target.startWord);
@@ -1460,8 +1366,8 @@ export function ReaderApp() {
     playbackRateRef.current = rate;
     updatePreferences({ rate });
     setStatusMessage(`Velocidad actualizada a ${rate === 1 ? "Normal" : rate}.`);
-    if (piperAudioRef.current && !piperAudioRef.current.ended) {
-      piperAudioRef.current.playbackRate = rate;
+    if (audioRef.current && !audioRef.current.ended) {
+      audioRef.current.playbackRate = rate;
       if (activeSegmentRef.current) {
         activeSegmentRef.current = {
           ...activeSegmentRef.current,
@@ -1469,14 +1375,14 @@ export function ReaderApp() {
         };
       }
 
-      if (!piperAudioRef.current.paused) {
+      if (!audioRef.current.paused) {
         const activeSegment = activeSegmentRef.current;
         const safeEndWord = Math.min(
           activeSegment?.endWord ?? document?.wordCount ?? progressWordRef.current,
           document?.wordCount ?? progressWordRef.current,
         );
-        startPiperProgressTracker(
-          piperAudioRef.current,
+        startAudioProgressTracker(
+          audioRef.current,
           activeSegment?.startWord ?? progressWordRef.current,
           safeEndWord,
           playbackSessionRef.current,
@@ -1499,6 +1405,7 @@ export function ReaderApp() {
 
   function toggleFocusControlsFromReading() {
     if (preferences.readingMode !== "focus") return;
+    if (focusControlsVisible) globalThis.document.querySelector<HTMLElement>(".document-text")?.focus();
     setFocusControlsVisible((visible) => !visible);
   }
 
@@ -1512,11 +1419,12 @@ export function ReaderApp() {
     selectedVoiceModelRef.current = modelId;
     const wasPlaying =
       isPlaying ||
-      Boolean(piperAudioRef.current && !piperAudioRef.current.paused && !piperAudioRef.current.ended) ||
-      Boolean(utteranceRef.current && window.speechSynthesis.speaking && !window.speechSynthesis.paused);
+      Boolean(audioRef.current && !audioRef.current.paused && !audioRef.current.ended) ||
+      Boolean(utteranceRef.current && window.speechSynthesis?.speaking && !window.speechSynthesis?.paused);
     const restartWord = progressWordRef.current;
 
     stopPlayback();
+    remoteSpeech.clear();
     setIsPlaying(false);
     if (wasPlaying) {
       void startSpeech(restartWord, undefined, preferences.rate, modelId);
@@ -1524,10 +1432,9 @@ export function ReaderApp() {
 
     updatePreferences({ voiceId: modelId });
     setIsVoiceMenuOpen(false);
+    setPlaybackError("");
     setStatusMessage(
-      modelId === PIPER_VOICE_MODEL_ID
-        ? "Laura seleccionada. Si no inicia, se usará Voz estándar."
-        : "Voz estándar seleccionada.",
+      modelId === STANDARD_VOICE_MODEL_ID ? "Voz del dispositivo seleccionada." : "Demo seleccionada. Se enviarán fragmentos de texto a Hugging Face; el audio será temporal.",
     );
   }
 
@@ -1536,6 +1443,65 @@ export function ReaderApp() {
     setIsPlaying(false);
     updateProgress(0);
     setStatusMessage("Lectura reiniciada. Avance guardado.");
+  }
+
+  function setTemporaryMode(enabled: boolean) {
+    temporaryReadingRef.current = enabled;
+    cancelPendingReaderSaves();
+    storageEnabledRef.current = !enabled;
+    setTemporaryReading(enabled);
+    setStatusMessage(enabled ? "Lectura temporal activada. Los datos anteriores solo se eliminan con Borrar datos." : "Guardado de documento y avance activado.");
+  }
+
+  async function deleteSavedData() {
+    if (isDeleting || isProcessing) return;
+    setIsDeleting(true);
+    stopPlayback(); setIsPlaying(false); remoteSpeech.clear();
+    temporaryReadingRef.current = true;
+    setTemporaryReading(true);
+    storageEnabledRef.current = false;
+    cancelPendingReaderSaves();
+    try {
+      const result = await clearReaderState({ mode: "all", recoverPending: true });
+      if (!result.ok) { setStorageWarning(result.error); return; }
+      if ("caches" in window) await caches.delete("reader-piper-laura-v1").catch(() => undefined);
+      setState(DEFAULT_READER_STATE);
+      setPastedText(""); setUrl(""); setStorageWarning(""); setPlaybackError("");
+      setStatusMessage("Datos del lector borrados. Lectura temporal activada.");
+    } finally { setIsDeleting(false); }
+  }
+
+  function changeReadingLanguage(event: ChangeEvent<HTMLSelectElement>) {
+    stopPlayback(); setIsPlaying(false);
+    updatePreferences({ language: event.currentTarget.value as "auto" | "es" | "en", systemVoiceURI: undefined });
+  }
+
+  function changeDeviceVoice(event: ChangeEvent<HTMLSelectElement>) {
+    stopPlayback(); setIsPlaying(false);
+    updatePreferences({ systemVoiceURI: event.currentTarget.value || undefined, voiceId: STANDARD_VOICE_MODEL_ID });
+    selectedVoiceModelRef.current = STANDARD_VOICE_MODEL_ID;
+  }
+
+  function renderReadingSettings() {
+    return (
+      <section id="reading-settings" className="reading-settings" aria-label="Ajustes de lectura">
+        <div className="reading-settings-heading"><h2>Ajustes de lectura</h2><button type="button" aria-label="Cerrar ajustes" onClick={() => setSettingsOpen(false)}><X size={18} /></button></div>
+        <label>Idioma de lectura
+          <select value={preferences.language ?? "auto"} onChange={changeReadingLanguage}><option value="auto">Detectar automáticamente</option><option value="es">Español</option><option value="en">English</option></select>
+        </label>
+        <label>Voz del dispositivo
+          <select value={preferences.systemVoiceURI ?? ""} onChange={changeDeviceVoice}><option value="">Automática, preferencia México</option>{systemVoices.map(voice => <option key={voice.voiceURI} value={voice.voiceURI}>{voice.name} · {voice.lang}</option>)}</select>
+        </label>
+        <label>Tamaño del texto
+          <select value={preferences.textScale ?? 1} onChange={(event) => updatePreferences({ textScale: Number(event.target.value) as ReaderPreferences["textScale"] })}>
+            <option value={0.9}>90%</option><option value={1}>100%</option><option value={1.1}>110%</option><option value={1.25}>125%</option>
+          </select>
+        </label>
+        <label className="temporary-reading"><input type="checkbox" checked={temporaryReading} onChange={(event) => setTemporaryMode(event.target.checked)} />Lectura temporal, sin guardar documento ni avance</label>
+        <p>Los datos guardados antes se conservan hasta pulsar Borrar datos. Las voces de Hugging Face envían fragmentos a demos públicas y usan audio temporal.</p>
+        <button className="delete-reader-data" type="button" onClick={() => void deleteSavedData()} disabled={isDeleting || isProcessing}><Trash2 size={16} />{isDeleting ? "Borrando…" : "Borrar datos del lector"}</button>
+      </section>
+    );
   }
 
   async function applyCleanOnly() {
@@ -1558,7 +1524,7 @@ export function ReaderApp() {
         ocrAvailable: false,
       }),
     );
-    setStatusMessage("Limpieza local aplicada: se retiraron citas, símbolos y marcas visuales sin inventar contenido.");
+    setStatusMessage("Limpieza local aplicada. Revisa nombres y cifras antes de escuchar.");
   }
 
   async function reconstructLegibleText() {
@@ -1609,6 +1575,40 @@ export function ReaderApp() {
           <span style={{ width: `${percentage}%` }} />
         </div>
         <div className="player-main-controls">
+          <div className="player-action-row">
+            <div className="transport">
+              <button type="button" onClick={() => seek(-10)} aria-label="Retroceder 10 segundos (aproximado con voz del dispositivo)">
+                <RotateCcw size={20} aria-hidden="true" />
+                <span>10 s</span>
+              </button>
+              <button type="button" onClick={() => seek(-5)} aria-label="Retroceder 5 segundos (aproximado con voz del dispositivo)">
+                <RotateCcw size={20} aria-hidden="true" />
+                <span>5 s</span>
+              </button>
+              <button className={`play-button ${audioPending ? "audio-pending" : ""}`} aria-busy={audioPending} type="button" onClick={togglePlayback} aria-label={isPlaying ? "Pausar" : "Reproducir"} title={isPlaying ? "Pausar" : "Reproducir"}>
+                {isPlaying ? <Pause size={22} /> : <Play size={22} />}
+              </button>
+              <button type="button" onClick={() => seek(5)} aria-label="Adelantar 5 segundos (aproximado con voz del dispositivo)">
+                <RotateCw size={20} aria-hidden="true" />
+                <span>5 s</span>
+              </button>
+              <button type="button" onClick={() => seek(10)} aria-label="Adelantar 10 segundos (aproximado con voz del dispositivo)">
+                <RotateCw size={20} aria-hidden="true" />
+                <span>10 s</span>
+              </button>
+            </div>
+
+            <label className="speed-control">Velocidad
+              <select aria-label="Velocidad de lectura" value={preferences.rate} onChange={(event) => changeRate(Number(event.target.value) as PlaybackRate)}>
+                {PLAYBACK_RATES.map(rate => <option key={rate} value={rate}>{rate === 1 ? "Normal" : `${rate}×`}</option>)}
+              </select>
+            </label>
+
+            <button className="reset-button" type="button" onClick={resetReading} aria-label="Reiniciar" title="Reiniciar">
+              <RotateCcw size={18} />
+              <span>Reiniciar</span>
+            </button>
+          </div>
           <div className="player-info-nav-row">
             <div className="player-readout-row">
               <div className="time-pill">
@@ -1620,49 +1620,6 @@ export function ReaderApp() {
             {renderTextNavigationControls("standard")}
           </div>
 
-          <div className="player-action-row">
-            <div className="transport">
-              <button type="button" onClick={() => seek(-10)} aria-label="Retroceder 10 segundos">
-                <RotateCcw size={20} aria-hidden="true" />
-                <span>10 s</span>
-              </button>
-              <button type="button" onClick={() => seek(-5)} aria-label="Retroceder 5 segundos">
-                <RotateCcw size={20} aria-hidden="true" />
-                <span>5 s</span>
-              </button>
-              <button className="play-button" type="button" onClick={togglePlayback} aria-label={isPlaying ? "Pausar" : "Reproducir"} title={isPlaying ? "Pausar" : "Reproducir"}>
-                {isPlaying ? <Pause size={22} /> : <Play size={22} />}
-              </button>
-              <button type="button" onClick={() => seek(5)} aria-label="Adelantar 5 segundos">
-                <RotateCw size={20} aria-hidden="true" />
-                <span>5 s</span>
-              </button>
-              <button type="button" onClick={() => seek(10)} aria-label="Adelantar 10 segundos">
-                <RotateCw size={20} aria-hidden="true" />
-                <span>10 s</span>
-              </button>
-            </div>
-
-            <div className="speed-control" aria-label="Velocidad de lectura">
-              {([1, 0.85, 0.75, 0.65, 0.5] as PlaybackRate[]).map((rate) => (
-                <button
-                  key={rate}
-                  type="button"
-                  data-rate={rate}
-                  aria-pressed={preferences.rate === rate}
-                  className={preferences.rate === rate ? "active" : ""}
-                  onClick={handleRateButtonClick}
-                >
-                  {rate === 1 ? "Normal" : rate}
-                </button>
-              ))}
-            </div>
-
-            <button className="reset-button" type="button" onClick={resetReading} aria-label="Reiniciar" title="Reiniciar">
-              <RotateCcw size={18} />
-              <span>Reiniciar</span>
-            </button>
-          </div>
         </div>
       </>
     );
@@ -1685,8 +1642,8 @@ export function ReaderApp() {
           type="button"
           aria-haspopup="menu"
           aria-expanded={isVoiceMenuOpen}
-          aria-label="Cambiar modelo de voz"
-          title="Cambiar modelo de voz"
+          aria-label={`Voz: ${activeModel.label}. Cambiar voz`}
+          title="Cambiar voz"
           onClick={() => setIsVoiceMenuOpen((isOpen) => !isOpen)}
         >
           <Speech size={19} />
@@ -1723,38 +1680,14 @@ export function ReaderApp() {
                 <small>{model.description}</small>
               </button>
             ))}
-            <small className="voice-credit"><a href="https://huggingface.co/HirCoir/Piper-TTS-Laura" target="_blank" rel="noreferrer">Laura por HirCoir · CC BY-NC 4.0</a></small>
+            <div className="voice-credit">
+              <p>Las demos envían fragmentos a Hugging Face. Audio temporal, sin modelos guardados en el navegador. Pueden tener cola o cuota.</p>
+              <a href="https://huggingface.co/ResembleAI/Chatterbox-Multilingual-es-mx-latam" target="_blank" rel="noreferrer">Chatterbox México · MIT</a>{" · "}
+              <a href="https://huggingface.co/hexgrad/Kokoro-82M" target="_blank" rel="noreferrer">Kokoro Dora · Apache 2.0</a>
+            </div>
           </div>
         ) : null}
       </div>
-    );
-  }
-
-  function renderVoiceStartupOverlay() {
-    if (!voiceStartup?.visible) return null;
-
-    return (
-      <dialog ref={voiceDialogRef} className="voice-startup-overlay" aria-labelledby="voice-startup-title" onCancel={() => { stopPlayback(); setIsPlaying(false); }}>
-        <div className="voice-startup-modal" data-voice-status={voiceStartup.status}>
-          <div className="voice-startup-icon" aria-hidden="true">
-            <Speech size={24} />
-          </div>
-          <div>
-            <p className="tool-title">Modelo de voz</p>
-            <h2 id="voice-startup-title" aria-live="polite">{voiceStartup.message}</h2>
-          </div>
-          {voiceStartup.detail ? <p>{voiceStartup.detail}</p> : null}
-          {typeof voiceStartup.progress === "number" ? (
-            <div
-              className="voice-startup-progress"
-              aria-label={`Descarga ${voiceStartup.progress}%`}
-            >
-              <span style={{ width: `${voiceStartup.progress}%` }} />
-            </div>
-          ) : null}
-          <button type="button" className="primary-action" onClick={() => { stopPlayback(); setIsPlaying(false); setStatusMessage("Preparación de voz cancelada."); }}>Cancelar</button>
-        </div>
-      </dialog>
     );
   }
 
@@ -1772,29 +1705,29 @@ export function ReaderApp() {
         {renderTextNavigationControls("focus")}
 
         <div className="focus-transport" aria-label="Reproducción">
-          <button type="button" onClick={() => seek(-10)} aria-label="Retroceder 10 segundos">
+          <button type="button" onClick={() => seek(-10)} aria-label="Retroceder 10 segundos (aproximado con voz del dispositivo)">
             <RotateCcw size={20} aria-hidden="true" />
             <span>10 s</span>
           </button>
-          <button type="button" onClick={() => seek(-5)} aria-label="Retroceder 5 segundos">
+          <button type="button" onClick={() => seek(-5)} aria-label="Retroceder 5 segundos (aproximado con voz del dispositivo)">
             <RotateCcw size={20} aria-hidden="true" />
             <span>5 s</span>
           </button>
-          <button className="focus-play-button" type="button" onClick={togglePlayback} aria-label={isPlaying ? "Pausar" : "Reproducir"} title={isPlaying ? "Pausar" : "Reproducir"}>
+          <button className={`focus-play-button ${audioPending ? "audio-pending" : ""}`} aria-busy={audioPending} type="button" onClick={togglePlayback} aria-label={isPlaying ? "Pausar" : "Reproducir"} title={isPlaying ? "Pausar" : "Reproducir"}>
             {isPlaying ? <Pause size={18} /> : <Play size={18} />}
           </button>
-          <button type="button" onClick={() => seek(5)} aria-label="Adelantar 5 segundos">
+          <button type="button" onClick={() => seek(5)} aria-label="Adelantar 5 segundos (aproximado con voz del dispositivo)">
             <RotateCw size={20} aria-hidden="true" />
             <span>5 s</span>
           </button>
-          <button type="button" onClick={() => seek(10)} aria-label="Adelantar 10 segundos">
+          <button type="button" onClick={() => seek(10)} aria-label="Adelantar 10 segundos (aproximado con voz del dispositivo)">
             <RotateCw size={20} aria-hidden="true" />
             <span>10 s</span>
           </button>
         </div>
 
         <div className="focus-speed" aria-label="Velocidad">
-          {([1, 0.85, 0.75, 0.65, 0.5] as PlaybackRate[]).map((rate) => (
+          {PLAYBACK_RATES.map((rate) => (
             <button
               key={rate}
               type="button"
@@ -1823,6 +1756,7 @@ export function ReaderApp() {
           <span>{preferences.theme === "night" ? "Papel" : "Noche"}</span>
         </button>
 
+        <button type="button" className="focus-settings-action" onClick={() => setSettingsOpen(value => !value)} aria-label="Ajustes de lectura"><Settings2 size={16} /></button>
         <button className="focus-exit-action" type="button" onClick={toggleFocusMode}>
           Salir
         </button>
@@ -1887,6 +1821,8 @@ export function ReaderApp() {
   function renderModeControls(className = "") {
     return (
       <div className={`tool-group mode-controls ${className}`.trim()}>
+        <button type="button" className="mode-button reading-settings-button" onClick={() => setSettingsOpen(value => !value)}
+          aria-expanded={settingsOpen} aria-controls="reading-settings" aria-label="Ajustes de lectura" title="Ajustes de lectura"><Settings2 size={18} /></button>
         <button
           type="button"
           className="mode-button"
@@ -1917,8 +1853,10 @@ export function ReaderApp() {
       className={`reader-shell book-layout theme-${preferences.theme} mode-${preferences.readingMode} ${
         document ? "has-document" : "empty-state"
       }`}
+      style={{ "--reader-font-scale": preferences.textScale ?? 1 } as CSSProperties}
     >
       <p className="status-accessible" role="status" aria-live="polite">{statusMessage}</p>
+      {playbackError ? <div role="alert" className="playback-notice"><span>{playbackError}</span><button type="button" aria-label="Cerrar aviso de audio" onClick={() => setPlaybackError("")}><X size={16} /></button></div> : null}
       {storageWarning ? <p role="alert" className="storage-warning">{storageWarning}</p> : null}
       <header ref={readerHeaderRef} className="reader-topbar">
         <div className="app-brand" aria-label="En voz">
@@ -1973,6 +1911,11 @@ export function ReaderApp() {
         {renderModeControls("book-mode-controls")}
       </header>
 
+      {settingsOpen ? renderReadingSettings() : null}
+      {preferences.readingMode === "focus" ? <button className="focus-controls-toggle" type="button"
+        aria-expanded={focusControlsVisible} onClick={toggleFocusControlsFromReading}>
+        {focusControlsVisible ? "Ocultar controles" : "Mostrar controles"}
+      </button> : null}
       <section className="workspace-grid">
         <section className="reader-center">
           {(!document || importOpen || isProcessing) ? <div className="import-panel">
@@ -2052,7 +1995,7 @@ export function ReaderApp() {
                   <div className="book-spread">
                     {visiblePages.map((page) => (
                       <section className="book-page" key={`${document.id}-${page.number}`} aria-label={`Página ${page.number}`}>
-                        <header className="book-page-heading"><span>{document.title}</span></header>
+                        <header className="book-page-heading"><h1>{document.title}</h1></header>
                         <div className="book-page-body">{page.blocks.map((block) => renderStructuredTextBlock(block, currentWord))}</div>
                         <footer className="book-folio">{page.number}</footer>
                       </section>
@@ -2081,7 +2024,7 @@ export function ReaderApp() {
                 Limpiar sin inventar
               </button>
               <small>
-                Limpieza local por reglas: quita citas, símbolos, emojis y marcas visuales sin inventar contenido.
+                Limpieza por reglas. Revisa el resultado, especialmente nombres, cifras y fórmulas.
               </small>
               {integrations.gptOssReady ? (
                 <>
@@ -2103,7 +2046,6 @@ export function ReaderApp() {
         {renderPlayerControls()}
       </footer> : null}
 
-      {renderVoiceStartupOverlay()}
 
       {preferences.readingMode === "focus" && focusControlsVisible ? renderFocusControls() : null}
     </main>

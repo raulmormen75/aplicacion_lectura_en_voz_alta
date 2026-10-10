@@ -1,0 +1,88 @@
+# En voz: mejoras y verificación
+
+Fecha: 10 de octubre de 2026 (UTC; investigación iniciada el 9 de octubre, hora de México).
+
+## Objetivo y resultado de código
+
+Se corrige la interrupción de la lectura causada por ventanas de preparación de voz en cada salto. La lectura comienza con las voces disponibles del dispositivo, sin descargar modelos. Las alternativas de Hugging Face se ofrecen de forma explícita y experimental; no se utiliza Azure ni una API de pago. El objetivo y sus condiciones de cierre están en `GOAL.md`; este archivo no activa un modo nativo `/goal` del cliente.
+
+La aplicación sigue siendo personal, con procesamiento local de archivos, progreso local, páginas de libro, OCR y lectura de sitios públicos. Se conserva el diseño negro, marfil y dorado. Las correcciones se organizan por responsabilidad en los siguientes archivos:
+
+| Área | Implementación | Cambio principal |
+| --- | --- | --- |
+| Reproducción y controles | `src/components/reader/ReaderApp.tsx` | Saltos sin diálogo, reutilización de audio, pausa, respaldo y ajustes |
+| Búfer de voz | `src/lib/reader/speech-buffer.ts` | Ventanas estables, anticipación, LRU acotada, cancelación y prioridad |
+| Voz remota | `src/lib/server/huggingface-speech.ts`, `src/app/api/speech/route.ts` | Proxy con destinos fijos, referencia mexicana, límites y validación WAV |
+| Texto | `src/lib/reader/text.ts` | Preparación única, citas y fidelidad de símbolos/variables |
+| Archivos | `src/lib/reader/import-file.ts` | PDF/DOCX acotados, columnas conservadoras y cancelación |
+| Almacenamiento | `src/lib/reader/storage.ts` | Modo temporal, borrado integral y coordinación entre pestañas |
+| Servidor | `src/lib/server/http-safety.ts`, `request-guard.ts` | Origen público, destinos seguros, cuotas, tiempos y bytes |
+| Verificación | `tests/`, `.github/workflows/checks.yml` | Regresiones, compilación y prueba de navegador con seguridad activa |
+
+## Estructura y actualización
+
+Next.js pasa de 16.2.4 a 16.4.0; React/React DOM de 19.2.4 a 19.3.0. PDF.js pasa a 6.4.299, Mammoth a 1.13.0 y NextAuth a 4.24.15. Se actualizan dependencias compatibles y el archivo de bloqueo. Node 24 es la versión de verificación y CI; se conserva el mínimo declarado de Node 22.13.
+
+Se leen las guías instaladas de Next y se ajusta el código a la API actual de PDF.js. La instalación `npm ci` y la compilación de producción se completan. ESLint 10 funciona en esta tanda; varios plugins incluidos por Next todavía declaran rangos de peer hasta ESLint 9 y generan avisos de instalación. Es una limitación del conjunto de dependencias, no una prueba de compatibilidad con cualquier regla futura.
+
+El modelo local Laura de 63.122.309 bytes y su configuración se retiran de los recursos publicados. Se conserva atribución, huella e historial. También se sustituye su prueba de interfaz antigua por pruebas de las voces y controles activos. Los módulos históricos de Piper permanecen fuera de la ruta de lectura actual; pueden retirarse en una limpieza posterior. `ReaderApp.tsx` sigue siendo grande: separar su transporte, ajustes e importación en componentes/hooks es una mejora pendiente de mantenimiento.
+
+## Diseño y operabilidad
+
+- La espera remota se muestra de forma discreta en Reproducir; no abre una ventana que interrumpa la lectura o la navegación. Pausar también puede cancelar la preparación actual.
+- Los saltos dentro del WAV preparado cambian su posición sin regenerarlo. Se preparan dos ventanas siguientes y el inicio del próximo párrafo; volver a una ventana conservada reutiliza el audio. Un salto a contenido nuevo todavía puede requerir espera remota.
+- El búfer vive solo en memoria, hasta 16 MiB y 32 entradas, con dos transportes simultáneos. Se vacía al cambiar documento/voz, borrar datos o desmontar el lector. Las respuestas tardías y sesiones canceladas no inician otra reproducción.
+- Si falla la voz remota o `audio.play()`, se limpia el transporte anterior, cambia el selector a Dispositivo y aparece un aviso visible. Pausa/reanudación siguen el motor realmente activo.
+- Se añaden selección manual de voz del dispositivo, idioma automático/español/inglés, texto al 90–125% y velocidad de 0.5–2. El menú admite teclado y conserva etiquetas/foco visibles.
+- En móvil los controles siguen el orden de reproducción y el acceso a Ajustes comparte la fila superior. Pantalla completa mantiene un botón accesible para ocultar/mostrar controles y salir.
+- Los segundos dentro del fragmento remoto activo usan el reloj del audio. El resaltado remoto, el tiempo restante y los saltos fuera de ese fragmento o con voz del dispositivo son estimaciones; no se presentan como alineación fonética exacta.
+
+## Fidelidad e importación
+
+La preparación del documento se realiza una sola vez para bloques, fragmentos y número de palabras. El reconocimiento de citas evita la expresión regular con comportamiento explosivo y conserva fechas/parentéticos que contienen información del texto. Se mantienen decimales, abreviaturas y signos de apertura en los cortes. División, potencias y comparaciones se verbalizan, sin unir variables separadas ni romper las barras de una URL o unidad compuesta.
+
+PDF y DOCX se procesan localmente. Límite general: 25 MiB y 300.000 caracteres. PDF permite 200 páginas y 20 páginas OCR, con límites de elementos de texto, geometría, píxeles y tiempo. La extracción usa lectura progresiva y cancelación. Dos columnas se detectan de forma conservadora y requieren revisión; algunos diseños ambiguos, girados o de tres columnas se rechazan con un error útil.
+
+DOCX valida la estructura ZIP, entradas y expansión real antes del parser: hasta 512 entradas, 32 MiB expandidos totales, 8 MiB por entrada y 4 MiB por XML/relaciones en cliente. No abre archivos externos ni incrusta imágenes. Requiere descompresión `deflate-raw` del navegador; se informa cuando no está disponible. El procesador histórico del servidor también limita la expansión ZIP y los elementos PDF.
+
+Los cambios mejoran errores concretos de fidelidad; no garantizan que OCR, tablas o fórmulas complejas se transcriban perfectamente. Revisa nombres y cifras antes de escuchar.
+
+## Privacidad y seguridad
+
+Lectura temporal detiene el autoguardado durante la sesión. Borrar datos elimina estado antiguo y todas las versiones documentales de IndexedDB, detiene audio y activa lectura temporal. Solo conserva un marcador sin contenido personal que bloquea escrituras de pestañas obsoletas. Se comprueban guardados pendientes, conflicto de revisiones y recuperación explícita de un borrado interrumpido.
+
+La voz remota transmite fragmentos a una demo pública; la aplicación no persiste modelos ni WAV. El proveedor puede conservar archivos según sus propias políticas. El lector borra el caché antiguo de Laura al abrir esta versión. Para información confidencial, evita las demos públicas; algunas voces del sistema también utilizan servicios de su proveedor.
+
+Las rutas de procesamiento, reconstrucción y voz validan origen, MIME y tamaño antes del trabajo. El origen utiliza el `Host` HTTP público, porque Next puede construir la URL con un hostname interno; los headers forwarded no amplían los orígenes admitidos. Las cuotas y la concurrencia usan estructuras acotadas por proceso; no son autenticación ni cuotas distribuidas. La aplicación continúa siendo accesible mediante su enlace.
+
+Se conservan validación de destinos, rechazo de IP privadas, DNS pinning y control de redirecciones. La cancelación del usuario alcanza DNS/transporte y lectura de cuerpos. La voz usa únicamente dos hosts fijos, limita tiempos/bytes, exige URLs del mismo Space y valida la integridad/estructura PCM del WAV. Las respuestas sensibles usan `no-store`.
+
+Se añaden CSP, `nosniff`, política de referencia, bloqueo de iframes y restricciones de permisos. El shell estático de Next necesita `unsafe-inline`; no se afirma que la política elimine toda superficie XSS. No se añadieron claves de pago ni secretos al cliente.
+
+`npm audit` pasa de 24 hallazgos (2 críticos, 16 altos, 5 moderados, 1 bajo) a **8 (0 críticos, 5 altos, 3 moderados)**. Los altos restantes pertenecen a la cadena de herramientas ESLint/Next (`braces`, `micromatch`, `fast-glob`); los moderados a Mammoth/`argparse`/`sprintf-js`. En la consulta final el registro no ofrece versiones parcheadas compatibles para esas dos cadenas: `audit fix --force` propone retroceder Next/Mammoth a versiones antiguas. No se aplica ese retroceso ni se ocultan los avisos. Los límites añadidos no equivalen a corregir esas dependencias; se mantienen como seguimiento pendiente.
+
+## Voces de Hugging Face y límites reales
+
+| Opción | Evidencia y motivo | Limitación |
+| --- | --- | --- |
+| Dispositivo | Ruta gratuita inicial, sin descarga de modelo; preferencia por voces es-MX disponibles y elección manual | Calidad, disponibilidad y posible servicio remoto dependen del equipo |
+| México · HF | Demo oficial de Chatterbox es-MX/LatAm, referencia `es_mx_f1.wav` obtenida de `/config`; licencia del modelo MIT | Modelo grande alojado con GPU, demo compartida; no hay comparación audible que pruebe que sea la mejor voz |
+| Dora · HF | Kokoro `ef_dora`, catálogo oficial femenino español; demo comunitaria verificada y licencia del modelo Apache 2.0 | Acento mexicano no confirmado; disponibilidad depende de la demo comunitaria |
+
+Las dos demos permitieron generar y descargar WAV sin token en las pruebas de investigación. Una frase pública tardó aproximadamente 9 segundos hasta generación y 12 segundos hasta descarga en ese entorno. Chatterbox requirió enviar su referencia no nula; usar el valor por defecto de `/info` no funcionó. Estos tiempos no son una medición de tu equipo ni de lectura prolongada.
+
+No son APIs de streaming: un fragmento se entrega cuando termina su generación. ZeroGPU tiene cola/cuota; un modelo abierto no garantiza alojamiento gratuito, ilimitado y continuo. El búfer reduce esperas al navegar por lo preparado, pero no hace instantáneo un fragmento desconocido. La calidad y el acento deben probarse escuchando desde la aplicación; no se atribuye identidad ni procedencia de entrenamiento a una voz por el nombre de su archivo.
+
+Fuentes primarias y enlaces de las demos: sección Voces del `README.md`. No se utilizó una lista de terceros como prueba de disponibilidad o de calidad audible.
+
+## Verificación de esta tanda
+
+- **290 pruebas automatizadas aprobadas**, sin fallos ni omisiones: texto/rendimiento, importación, almacenamiento, motores históricos, caché offline, servidor, límites del proxy y búfer.
+- ESLint y compilación de producción correctos. `npm ci` repetido satisfactoriamente. La compilación incluye `/api/speech` y genera 16 recursos de núcleo offline, aproximadamente 1,11 MB; no incluye modelos.
+- Chromium con seguridad activa, perfiles aislados a 1280×900 y 390×844: transporte con WAV reproducido realmente, pausa/reanudación, velocidad, saltos de línea y párrafo preparados sin repetir su petición, respaldo tras rechazo de reproducción, pantalla completa, lectura temporal y borrado. Sin errores JavaScript/CSP ni peticiones de modelos. Los WAV de esta prueba son sintéticos; no acreditan calidad de voz.
+- Se consulta la API real antes de simular audio: una petición del mismo origen llega a validación de voz y retorna 400 para una voz inválida. La comprobación encontró y corrigió el problema de hostname interno de Next.
+- Prueba PWA: recarga offline servida por el service worker, preparación local de texto, icono y puntuación conservados, sin POST API.
+- Este entorno no resuelve el DNS de los Spaces (`EAI_AGAIN`), por lo que el proxy real no puede verificarse aquí. La integración final debe comprobarse desde Vercel. El fallo no se presenta como una generación satisfactoria.
+- No se han probado Android/iOS físicos, voces de cada sistema, documentos privados del usuario ni todas las composiciones PDF/OCR posibles.
+
+La comprobación de GitHub/Vercel se incorpora a este informe después de publicar. Un build local no acredita que la versión esté activa en el dominio.

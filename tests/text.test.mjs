@@ -2,6 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   cleanTextForSpeech,
+  cleanTextWithoutInventing,
+  countWords,
+  createDocumentFromText,
   prepareTextForReading,
   splitIntoChunks,
   tokenizeWords,
@@ -87,6 +90,10 @@ for (const citation of [
   "(García, 2019, 2020; López, 2021)",
   "(García, s. f.)",
   "(García,\n2020)",
+  "(García, **2020**)",
+  "[García, **2020**]",
+  "(Organización **Mundial** de la Salud, 2020)",
+  "(Smith, de la Cruz & Jones et al., 2019, 2020a, págs. 12–15)",
   "(ibid.)",
   "[García, 2020]",
   "[1, 3-5]",
@@ -107,6 +114,17 @@ for (const [original, expected] of [
   ["+ x = x", "más x igual a x"],
   ["+ x", "más x"],
   ["2+(3+4)=9", "2 más (3 más 4) igual a 9"],
+  ["10/2=5", "10 dividido entre 2 igual a 5"],
+  ["x^2", "x elevado a 2"],
+  ["x^(-2)", "x elevado a (-2)"],
+  ["2*3=6", "2 por 3 igual a 6"],
+  ["(x - y)/2", "(x - y) dividido entre 2"],
+  ["x<y", "x menor que y"],
+  ["10 <= 20", "10 menor o igual que 20"],
+  ["x > y", "x mayor que y"],
+  ["x>=2", "x mayor o igual que 2"],
+  ["x≤2; y≥3; z≠4", "x menor o igual que 2; y mayor o igual que 3; z distinto de 4"],
+  ["2×3=6; 10÷2=5", "2 por 3 igual a 6; 10 dividido entre 2 igual a 5"],
 ]) {
   test(`retains audible operators: ${original}`, () => {
     assert.equal(cleanTextForSpeech(original), expected);
@@ -135,4 +153,81 @@ test("mixed content remains stable through blocks, tokens and chunks", () => {
   assert.deepEqual(tokenizeWords(expected).map((token) => token.text),
     ["Resultado", "La", "regla", "vigente", "desde", "2020", "establece", "2", "más", "2", "igual", "a", "4"]);
   assert.equal(splitIntoChunks(original).map((chunk) => chunk.text).join("\n\n"), expected);
+});
+
+test("document chunks, blocks and progress use the same once-prepared text", () => {
+  const original = "## Resultados\n\nLa evidencia (García, **2020**) registra 3.14 unidades. " +
+    "El Dr. García explica 10/2 y x^2 con claridad. ".repeat(30) + "¿Cuál es la conclusión final?";
+  const document = createDocumentFromText({ title: "Ejemplo", source: "pastedText", sourceLabel: "Prueba", text: original });
+  assert.equal(document.originalText, original);
+  assert.ok(!document.cleanText.includes("García, 2020"));
+  const tokens = tokenizeWords(document.cleanText);
+  assert.equal(document.wordCount, tokens.length);
+  assert.deepEqual(document.chunks.flatMap((chunk) => tokenizeWords(chunk.cleanText).map((token) => token.text)),
+    tokens.map((token) => token.text));
+  let nextWord = 0;
+  for (const chunk of document.chunks) {
+    assert.equal(chunk.startWord, nextWord);
+    assert.equal(chunk.wordCount, countWords(chunk.cleanText));
+    assert.equal(chunk.text, chunk.cleanText);
+    nextWord += chunk.wordCount;
+  }
+  assert.equal(nextWord, document.wordCount);
+  let blockWord = 0;
+  for (const block of document.blocks) {
+    assert.equal(document.cleanText.slice(block.start, block.end), block.text);
+    assert.equal(block.startWord, blockWord);
+    blockWord += block.wordCount;
+  }
+  assert.equal(blockWord, document.wordCount);
+  assert.equal(document.chunks.map((chunk) => chunk.text).join(" ").replace(/\s+/g, " "),
+    document.cleanText.replace(/\s+/g, " "));
+});
+
+test("long blocks retain decimals, abbreviations and opening punctuation across actual chunk boundaries", () => {
+  const original = "El Dr. García mide 3.14 unidades; p. ej. usa 1.25 litros. ".repeat(12) +
+    "¿Por qué son útiles esas medidas? ¡Conservan la precisión!";
+  const prepared = prepareTextForReading(original);
+  const chunks = splitIntoChunks(original, 8);
+  assert.ok(chunks.length > 2);
+  assert.equal(chunks.map((chunk) => chunk.text).join(" ").replace(/\s+/g, " "),
+    prepared.cleanText.replace(/\s+/g, " "));
+  assert.deepEqual(chunks.flatMap((chunk) => tokenizeWords(chunk.text).map((token) => token.text)),
+    tokenizeWords(prepared.cleanText).map((token) => token.text));
+  assert.equal(chunks.filter((chunk) => chunk.text.includes("3.14")).length, 12);
+  assert.equal(chunks.filter((chunk) => chunk.text.includes("1.25")).length, 12);
+  assert.ok(chunks.every((chunk) => !/\b(?:Dr\.|p\.|ej\.)$/.test(chunk.text)));
+  assert.ok(chunks.some((chunk) => chunk.text.includes("¿Por")));
+  assert.ok(chunks.some((chunk) => chunk.text.includes("¡Conservan")));
+});
+
+test("small chunk budgets keep numeric and abbreviation units whole", () => {
+  const chunks = splitIntoChunks("El Dr. García usa 3.14 unidades y p. ej. 1.25 litros.", 1);
+  assert.ok(chunks.some((chunk) => chunk.text.includes("Dr. García")));
+  assert.ok(chunks.some((chunk) => chunk.text.includes("p. ej. 1.25")));
+  assert.ok(chunks.some((chunk) => chunk.text === "3.14"));
+  assert.ok(chunks.every((chunk) => chunk.wordCount === countWords(chunk.text)));
+});
+
+test("clean-only retains separate variables and subtraction while repairing explicit word wraps", () => {
+  assert.equal(cleanTextWithoutInventing("Las variables x y z son independientes."),
+    "Las variables x y z son independientes.");
+  assert.equal(cleanTextWithoutInventing("x - y; x-\ny; teleco-\nmunicaciones."),
+    "x - y; x- y; telecomunicaciones.");
+  assert.equal(cleanTextWithoutInventing("a y b; i o u."), "a y b; i o u.");
+});
+
+test("citation parsing keeps malformed references and semantic suffixes", () => {
+  for (const reference of [
+    "(García, 2020xx)", "(García, 2020, resultado)", "(Smith & & Jones, 2020)",
+    "(García, 2020; vigente desde 2020)", "(and García, 2020)", "(García, 2020, pp. sin datos)",
+  ]) {
+    const original = `La descripción ${reference} sigue siendo necesaria.`;
+    assert.equal(cleanTextForSpeech(original), original);
+  }
+});
+
+test("a URL and compound unit retain their slashes", () => {
+  assert.equal(cleanTextForSpeech("Consulta https://example.com/path a 10 km/h y/o toma notas."),
+    "Consulta https://example.com/path a 10 km/h y/o toma notas.");
 });

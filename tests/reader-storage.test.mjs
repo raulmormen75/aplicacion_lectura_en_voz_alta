@@ -19,7 +19,7 @@ function harness(shared = {}) {
   const local = shared.local ?? new Map();
   const documents = shared.documents ?? new Map();
   const coordination = shared.coordination ?? { queue: [], busy: false };
-  const control = { writes: 0, hold: false, pending: [], failPut: false, failLocal: false, failOpen: false, blocked: false };
+  const control = { writes: 0, hold: false, pending: [], pendingOpens: [], failPut: false, failLocal: false, failOpen: false, blocked: false };
   const pump = () => {
     if (coordination.busy || !coordination.queue.length) return;
     coordination.busy = true;
@@ -28,7 +28,7 @@ function harness(shared = {}) {
   const indexedDB = {
     open() {
       const request = {};
-      setImmediate(() => {
+      const completeOpen = () => {
         if (control.blocked) { request.onblocked?.(); return; }
         if (control.failOpen) { request.error = new Error("denied"); request.onerror?.(); return; }
         request.result = {
@@ -37,6 +37,7 @@ function harness(shared = {}) {
             const jobs = [];
             let staged;
             let ended = false;
+            let running = false;
             const finish = (aborted) => {
               if (ended) return;
               ended = true;
@@ -46,9 +47,11 @@ function harness(shared = {}) {
               }
               if (aborted) transaction.onabort?.();
               else transaction.oncomplete?.();
-              control.afterTransaction?.(aborted);
-              coordination.busy = false;
-              setImmediate(pump);
+              if (running) {
+                control.afterTransaction?.(aborted);
+                coordination.busy = false;
+                setImmediate(pump);
+              }
             };
             const transaction = { abort() { finish(true); } };
             const next = () => {
@@ -88,12 +91,21 @@ function harness(shared = {}) {
               put: (value, key) => operation("put", key, value),
               clear: () => operation("clear"),
             });
-            coordination.queue.push(() => { staged = new Map(documents); next(); });
+            coordination.queue.push(() => {
+              if (ended) { coordination.busy = false; setImmediate(pump); return; }
+              running = true;
+              staged = new Map(documents);
+              next();
+            });
             setImmediate(pump);
             return transaction;
           },
         };
         request.onsuccess?.();
+      };
+      setImmediate(() => {
+        if (control.holdOpen) control.pendingOpens.push(completeOpen);
+        else completeOpen();
       });
       return request;
     },
@@ -101,10 +113,10 @@ function harness(shared = {}) {
   const window = { indexedDB, localStorage: {
     getItem(key) { if (control.failRead) throw new Error("denied"); return local.get(key) ?? null; },
     setItem(key, value) { if (control.failLocal) throw new DOMException("full", "QuotaExceededError"); local.set(key, value); },
-    removeItem(key) { local.delete(key); },
+    removeItem(key) { if (control.failRemove) throw new Error("denied"); local.delete(key); },
   } };
   const exports = {};
-  runInNewContext(source, { exports, require, window, structuredClone, crypto: globalThis.crypto, setTimeout, clearTimeout });
+  runInNewContext(source, { exports, require, window, structuredClone, crypto: globalThis.crypto, AbortController, setTimeout, clearTimeout });
   return { api: exports, local, documents, control, coordination };
 }
 
@@ -692,4 +704,249 @@ test("save/load during reset return a retryable error and do not create a dangli
   assert.equal((await clearing).ok, true);
   assert.equal((await h.api.loadReaderState()).state.document, null);
   assert.equal((await h.api.saveReaderState(state(h, document("new")))).ok, true);
+});
+
+test("privacy erase removes legacy and every document version, leaving only revision metadata", async () => {
+  const h = harness();
+  h.local.set("unrelated", "keep");
+  for (let version = 0; version < 3; version++) {
+    const saved = state(h, document("private-title", 4 + version));
+    saved.session.userName = "private-name";
+    saved.preferences.voiceId = "private-voice";
+    assert.equal((await h.api.saveReaderState(saved)).ok, true);
+  }
+  const legacy = JSON.stringify(state(h, document("private-legacy")));
+  h.local.set(V1, legacy);
+  const oldRevision = JSON.parse(h.local.get(V2)).revision;
+  assert.equal((await h.api.clearReaderState({ mode: "all" })).ok, true);
+  const marker = JSON.parse(h.local.get(V2));
+  assert.deepEqual(marker, { version: 2, cleared: true, revision: marker.revision });
+  assert.notEqual(marker.revision, oldRevision);
+  assert.equal(h.local.has(V1), false);
+  assert.equal(h.documents.size, 0);
+  assert.equal(h.local.get("unrelated"), "keep");
+  assert.equal(h.local.get(V2).includes("private"), false);
+  // A legacy client restoring v1 still cannot bring the deleted book back.
+  h.local.set(V1, legacy);
+  const loaded = await harness(h).api.loadReaderState();
+  assert.equal(loaded.ok, true);
+  assert.equal(loaded.state.document, null);
+  assert.equal(loaded.state.preferences.voiceId, "browser-standard");
+});
+
+test("privacy erase revision blocks a stale tab that originally loaded empty storage", async () => {
+  const a = harness();
+  const b = harness(a);
+  assert.equal((await b.api.loadReaderState()).ok, true);
+  assert.equal((await a.api.clearReaderState({ mode: "all" })).ok, true);
+  const marker = a.local.get(V2);
+  assertVisibleConflict(await b.api.saveReaderState(state(b, document("pre-erase-memory"))));
+  assert.equal(a.local.get(V2), marker);
+  assert.equal(a.documents.size, 0);
+  const current = await b.api.loadReaderState();
+  assert.equal(current.ok, true);
+  assert.equal((await b.api.saveReaderState(state(b, document("new-consent")))).ok, true);
+});
+
+test("privacy erase cannot delete a checkpoint updated since this tab loaded it", async () => {
+  const { a, b, aState } = await twoTabs();
+  aState.progress.currentWord = 200;
+  assert.equal((await a.api.saveReaderState(aState)).ok, true);
+  const raw = a.local.get(V2);
+  a.local.set(V1, "legacy");
+  assertVisibleConflict(await b.api.clearReaderState({ mode: "all" }));
+  assert.equal(a.local.get(V2), raw);
+  assert.equal(a.local.get(V1), "legacy");
+  assert.equal(a.documents.size, 1);
+});
+
+test("aborted privacy erase preserves the original checkpoint, legacy and document", async () => {
+  const { a, b } = await twoTabs();
+  const raw = a.local.get(V2);
+  const legacy = JSON.stringify(state(a, document("legacy")));
+  a.local.set(V1, legacy);
+  a.control.failClear = true;
+  assert.equal((await a.api.clearReaderState({ mode: "all" })).ok, false);
+  assert.equal(a.local.get(V2), raw);
+  assert.equal(a.local.get(V1), legacy);
+  assert.equal(a.documents.size, 1);
+  assert.equal((await b.api.loadReaderState()).state.document.id, "shared");
+});
+
+test("failed privacy finalization is not reported as erased and the same tab can retry safely", async () => {
+  const { a, b } = await twoTabs();
+  a.local.set(V1, "private-legacy");
+  a.control.afterTransaction = (aborted) => {
+    if (!aborted && a.documents.size === 0) a.control.failLocal = true;
+  };
+  assert.equal((await a.api.clearReaderState({ mode: "all" })).ok, false);
+  assert.equal(a.documents.size, 0);
+  assert.equal(a.local.has(V1), false);
+  assert.equal(JSON.parse(a.local.get(V2)).pendingClear, true);
+  const blocked = await b.api.loadReaderState();
+  assert.equal(blocked.ok, false);
+  assert.equal((await b.api.saveReaderState(blocked.state)).ok, false);
+  assert.equal((await b.api.clearReaderState({ mode: "all" })).ok, false);
+  a.control.afterTransaction = undefined;
+  a.control.failLocal = false;
+  assert.equal((await a.api.clearReaderState({ mode: "all" })).ok, true);
+  assert.equal((await b.api.loadReaderState()).state.document, null);
+  assert.equal(JSON.parse(a.local.get(V2)).pendingClear, undefined);
+});
+
+test("denied legacy removal keeps privacy erase pending until an explicit successful retry", async () => {
+  const h = harness();
+  await h.api.saveReaderState(state(h));
+  h.local.set(V1, "legacy");
+  h.control.failRemove = true;
+  assert.equal((await h.api.clearReaderState({ mode: "all" })).ok, false);
+  assert.equal(h.documents.size, 0);
+  assert.equal(h.local.get(V1), "legacy");
+  assert.equal((await harness(h).api.loadReaderState()).ok, false);
+  h.control.failRemove = false;
+  assert.equal((await h.api.clearReaderState({ mode: "all" })).ok, true);
+  assert.equal(h.local.has(V1), false);
+  assert.equal((await harness(h).api.loadReaderState()).state.document, null);
+});
+
+test("explicit recovery after reload completes only the unchanged pending privacy erase", async () => {
+  for (const replacedDuringRecovery of [false, true]) {
+    const original = harness();
+    await original.api.saveReaderState(state(original));
+    original.local.set(V1, "legacy");
+    original.control.failRemove = true;
+    assert.equal((await original.api.clearReaderState({ mode: "all" })).ok, false);
+    const pending = original.local.get(V2);
+    assert.equal(JSON.parse(pending).pendingClear, true);
+    const reloaded = harness(original);
+    const load = await reloaded.api.loadReaderState();
+    assert.equal(load.ok, false);
+    assert.equal(original.local.get(V2), pending);
+    assert.equal(original.local.get(V1), "legacy");
+    assert.equal((await reloaded.api.saveReaderState(load.state)).ok, false);
+    assert.equal((await reloaded.api.clearReaderState({ recoverPending: true })).code, "invalid");
+    if (replacedDuringRecovery) reloaded.control.holdGet = true;
+    const recovering = reloaded.api.clearReaderState({ mode: "all", recoverPending: true });
+    if (replacedDuringRecovery) {
+      await waitForPending(reloaded);
+      const empty = structuredClone(reloaded.api.DEFAULT_READER_STATE);
+      const newer = JSON.stringify({
+        version: 2, revision: "newer-writer", documentId: null, documentKey: null,
+        progress: empty.progress, preferences: { ...empty.preferences, theme: "night" }, session: empty.session,
+      });
+      original.local.set(V2, newer);
+      reloaded.control.pending.shift()();
+      assertVisibleConflict(await recovering);
+      assert.equal(original.local.get(V2), newer);
+      assert.equal(original.local.get(V1), "legacy");
+      const current = await harness(original).api.loadReaderState();
+      assert.equal(current.ok, true);
+      assert.equal(current.state.preferences.theme, "night");
+    } else {
+      assert.equal((await recovering).ok, true);
+      assert.equal(original.local.has(V1), false);
+      assert.equal(JSON.parse(original.local.get(V2)).pendingClear, undefined);
+      assert.equal((await reloaded.api.loadReaderState()).state.document, null);
+    }
+    assert.equal(original.documents.size, 0);
+  }
+});
+
+test("a delayed document preparation from another tab cannot recreate data after privacy erase", async () => {
+  const { a, b } = await twoTabs();
+  b.control.holdOpen = true;
+  const saving = b.api.saveReaderState(state(b, document("delayed-book")));
+  for (let i = 0; i < 50 && !b.control.pendingOpens.length; i++) await turn();
+  assert.equal(b.control.pendingOpens.length, 1);
+  assert.equal((await a.api.clearReaderState({ mode: "all" })).ok, true);
+  const marker = a.local.get(V2);
+  b.control.holdOpen = false;
+  b.control.pendingOpens.shift()();
+  assertVisibleConflict(await saving);
+  assert.equal(a.documents.size, 0);
+  assert.equal(a.local.get(V2), marker);
+});
+
+test("a delayed legacy migration cannot resurrect the document erased by another tab", async () => {
+  const a = harness();
+  const b = harness(a);
+  a.local.set(V1, JSON.stringify(state(a, document("legacy"))));
+  b.control.holdOpen = true;
+  const migrating = b.api.loadReaderState();
+  for (let i = 0; i < 50 && !b.control.pendingOpens.length; i++) await turn();
+  assert.equal(b.control.pendingOpens.length, 1);
+  assert.equal((await a.api.clearReaderState({ mode: "all" })).ok, true);
+  b.control.holdOpen = false;
+  b.control.pendingOpens.shift()();
+  assertVisibleConflict(await migrating);
+  assert.equal(a.documents.size, 0);
+  assert.equal(a.local.has(V1), false);
+  assert.equal((await harness(a).api.loadReaderState()).state.document, null);
+});
+
+test("entering temporary reading cancels an uncommitted document without changing later save policy", async () => {
+  const h = harness();
+  const value = state(h, document("temporary"));
+  h.control.hold = true;
+  const saving = h.api.saveReaderState(value);
+  await waitForPending(h);
+  h.api.cancelPendingReaderSaves();
+  assert.equal((await saving).code, "superseded");
+  h.control.pending.shift()();
+  assert.equal(h.local.has(V2), false);
+  assert.equal(h.documents.size, 0);
+  h.control.hold = false;
+  // The UI owns the policy. Explicitly saving again still works.
+  assert.equal((await h.api.saveReaderState(value)).ok, true);
+  assert.equal((await harness(h).api.loadReaderState()).state.document.id, "temporary");
+});
+
+test("temporary reading invalidates a pending progress publication while retaining already saved data", async () => {
+  const h = harness();
+  const value = state(h);
+  await h.api.saveReaderState(value);
+  const raw = h.local.get(V2);
+  h.control.holdGet = true;
+  const saving = h.api.saveReaderState({ ...value, progress: { ...value.progress, currentWord: 3 } });
+  await waitForPending(h);
+  h.api.cancelPendingReaderSaves();
+  h.control.pending.shift()();
+  assert.equal((await saving).code, "superseded");
+  assert.equal(h.local.get(V2), raw);
+  assert.equal(h.documents.size, 1);
+});
+
+test("temporary reading cancels every prepared document in this tab, including an older queued selection", async () => {
+  const h = harness();
+  h.control.hold = true;
+  const first = h.api.saveReaderState(state(h, document("old-selection")));
+  await waitForPending(h);
+  const second = h.api.saveReaderState(state(h, document("new-selection")));
+  await turn();
+  h.api.cancelPendingReaderSaves();
+  const results = await Promise.all([first, second]);
+  assert.equal(results.every((result) => result.code === "superseded"), true);
+  for (const complete of h.control.pending.splice(0)) complete();
+  assert.equal(h.documents.size, 0);
+  assert.equal(h.local.has(V2), false);
+});
+
+test("new rates, language and text size preferences round-trip without adding fields to legacy preferences", async () => {
+  const h = harness();
+  for (const rate of [1.25, 1.5, 2]) {
+    const value = state(h);
+    value.preferences = { ...value.preferences, rate, language: "en", textScale: 1.25, systemVoiceURI: "native-voice" };
+    assert.equal((await h.api.saveReaderState(value)).ok, true);
+    const loaded = await h.api.loadReaderState();
+    assert.equal(loaded.state.preferences.rate, rate);
+    assert.equal(loaded.state.preferences.language, "en");
+    assert.equal(loaded.state.preferences.textScale, 1.25);
+    assert.equal(loaded.state.preferences.systemVoiceURI, "native-voice");
+  }
+  const legacy = harness();
+  legacy.local.set(V1, JSON.stringify(state(legacy)));
+  const loaded = await legacy.api.loadReaderState();
+  assert.equal(Object.hasOwn(loaded.state.preferences, "language"), false);
+  assert.equal(Object.hasOwn(loaded.state.preferences, "textScale"), false);
+  assert.equal(Object.hasOwn(loaded.state.preferences, "systemVoiceURI"), false);
 });

@@ -22,16 +22,12 @@ type PhonemizerOptions = {
 };
 type PhonemizerFactory = (options: PhonemizerOptions) => Promise<{ callMain(args: string[]): void }>;
 
-function browserCache() {
-  try { return globalThis.caches; } catch { return undefined; }
-}
-
 // Cache failures never prevent inference. Only complete, validated downloads are stored.
 export async function loadLauraAsset(
   url: string,
   report: Report,
   validate: (bytes: ArrayBuffer) => Promise<void> | void,
-  storage: CacheStorage | undefined = browserCache(),
+  storage: CacheStorage | undefined = undefined,
   fetchAsset: typeof fetch = globalThis.fetch,
 ): Promise<ArrayBuffer> {
   let cache: Cache | undefined;

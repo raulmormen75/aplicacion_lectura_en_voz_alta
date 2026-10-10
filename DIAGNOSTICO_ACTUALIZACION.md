@@ -1,5 +1,7 @@
 # Diagnóstico y actualización del lector
 
+> Documento histórico de septiembre de 2026. El diagnóstico, las preferencias de voz y el estado de esta actualización están en [INFORME_MEJORAS_2026_10_10.md](INFORME_MEJORAS_2026_10_10.md) y [GOAL.md](GOAL.md). La petición actual retira el uso automático de modelos locales y autoriza las nuevas opciones de Hugging Face; las restricciones antiguas sobre conservar los dos modelos no describen esta iteración.
+
 Fecha de revisión: 16 de septiembre de 2026.
 
 ## Alcance y criterio de cierre

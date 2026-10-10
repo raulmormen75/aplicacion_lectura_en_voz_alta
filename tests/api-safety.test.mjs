@@ -5,6 +5,8 @@ import { createRequire } from "node:module";
 import { resolve } from "node:path";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
+import { crc32, deflateRawSync } from "node:zlib";
+import { getEventListeners } from "node:events";
 import vm from "node:vm";
 
 const require = createRequire(import.meta.url);
@@ -170,13 +172,13 @@ test("bound request stream and return safe JSON errors", async () => {
   assert.equal(Buffer.from(await safety.readBoundedBody(req("12345"), 5)).toString(), "12345");
 });
 
-const jsonRequest = (payload) => new Request("http://test", { method: "POST", body: JSON.stringify(payload), headers: { "content-type": "application/json" } });
+const jsonRequest = (payload, headers = {}) => new Request("http://test", { method: "POST", body: JSON.stringify(payload), headers: { "content-type": "application/json", origin: "http://test", ...headers } });
 test("reconstruct validates inputs without contacting inference", async () => {
   const route = load("src/app/api/text/reconstruct/route.ts", { "@/lib/server/http-safety": { ...safety, readRemote: () => assert.fail("network") } });
   for (const [text, status] of [["", 400], ["   ", 400], [42, 400], ["a".repeat(24_001), 413]]) {
     assert.equal((await route.POST(jsonRequest({ text }))).status, status);
   }
-  assert.equal((await route.POST(new Request("http://test", { method: "POST", body: "{" }))).status, 400);
+  assert.equal((await route.POST(new Request("http://test", { method: "POST", body: "{", headers: { "content-type": "application/json", origin: "http://test" } }))).status, 400);
   assert.equal((await (await route.POST(jsonRequest({ text: "Texto sintetico." }))).json()).mode, "clean-only");
 });
 
@@ -207,9 +209,9 @@ test("documents retains pasted text and multipart contracts with safe errors", a
   let response = await route.POST(jsonRequest({ source: "pastedText", text: "Texto sintetico completo." }));
   assert.equal(response.status, 200); assert.ok((await response.json()).document.cleanText);
   const form = new FormData(); form.append("file", new File(["Texto sintetico."], "sample.txt", { type: "text/plain" }));
-  response = await route.POST(new Request("http://test", { method: "POST", body: form }));
+  response = await route.POST(new Request("http://test", { method: "POST", body: form, headers: { origin: "http://test" } }));
   assert.equal(response.status, 200); assert.ok((await response.json()).document);
-  response = await route.POST(new Request("http://test", { method: "POST", body: "{", headers: { "content-type": "application/json" } }));
+  response = await route.POST(new Request("http://test", { method: "POST", body: "{", headers: { "content-type": "application/json", origin: "http://test" } }));
   assert.equal(response.status, 400);
   response = await route.POST(jsonRequest({ source: "pastedText", text: "a".repeat(300_001) }));
   assert.equal(response.status, 413);
@@ -219,7 +221,7 @@ test("documents retains pasted text and multipart contracts with safe errors", a
 
 const fileRequest = (body, name, type) => {
   const form = new FormData(); form.append("file", new File([body], name, { type }));
-  return new Request("http://test", { method: "POST", body: form });
+  return new Request("http://test", { method: "POST", body: form, headers: { origin: "http://test" } });
 };
 
 test("documents rejects oversized multipart and unsupported old Word format", async () => {
@@ -264,8 +266,167 @@ test("PDF compatibility: text, no text, page cap and cleanup on parser failure",
 });
 
 test("DOCX parser contract remains compatible", async () => {
-  const route = load("src/app/api/documents/process/route.ts", { mammoth: { convertToHtml: async () => ({ value: "<p>Texto Word sintetico.</p>", messages: [] }) } });
-  const response = await route.POST(fileRequest("PK-synthetic", "sample.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"));
+  const route = load("src/app/api/documents/process/route.ts", { mammoth: {
+    images: require("mammoth").images,
+    convertToHtml: async (_input, options) => {
+      assert.equal(options.externalFileAccess, false);
+      assert.ok(options.convertImage);
+      return { value: "<p>Texto Word sintetico.</p>", messages: [] };
+    },
+  } });
+  const response = await route.POST(fileRequest(docxZip(), "sample.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"));
   assert.equal(response.status, 200);
   assert.equal((await response.json()).document.cleanText, "Texto Word sintetico.");
+});
+
+function docxZip(entries = [
+  { name: "[Content_Types].xml", content: "<Types/>" },
+  { name: "word/document.xml", content: "<document>Texto sintetico.</document>" },
+]) {
+  const files = []; const directory = []; let offset = 0;
+  for (const entry of entries) {
+    const name = Buffer.from(entry.name); const content = Buffer.from(entry.content);
+    const method = entry.method ?? 8;
+    const compressed = method === 0 ? content : deflateRawSync(content);
+    const local = Buffer.alloc(30); local.writeUInt32LE(0x04034b50); local.writeUInt16LE(20, 4);
+    local.writeUInt16LE(method, 8); local.writeUInt32LE(crc32(content), 14);
+    local.writeUInt32LE(compressed.length, 18); local.writeUInt32LE(entry.claimedSize ?? content.length, 22);
+    local.writeUInt16LE(name.length, 26);
+    const central = Buffer.alloc(46); central.writeUInt32LE(0x02014b50); central.writeUInt16LE(20, 4); central.writeUInt16LE(20, 6);
+    central.writeUInt16LE(method, 10); central.writeUInt32LE(crc32(content), 16);
+    central.writeUInt32LE(compressed.length, 20); central.writeUInt32LE(entry.claimedSize ?? content.length, 24);
+    central.writeUInt16LE(name.length, 28); central.writeUInt32LE(offset, 42);
+    files.push(local, name, compressed); directory.push(central, name);
+    offset += local.length + name.length + compressed.length;
+  }
+  const index = Buffer.concat(directory); const end = Buffer.alloc(22); end.writeUInt32LE(0x06054b50);
+  end.writeUInt16LE(entries.length, 8); end.writeUInt16LE(entries.length, 10);
+  end.writeUInt32LE(index.length, 12); end.writeUInt32LE(offset, 16);
+  return Buffer.concat([...files, index, end]);
+}
+
+test("external cancellation stops DNS/body work and removes signal listeners", async () => {
+  const dnsController = new AbortController();
+  const dns = safety.createRemoteReader({ lookup: () => new Promise(() => {}), httpRequest: () => assert.fail(), httpsRequest: () => assert.fail() });
+  const pendingDns = dns("https://example.test", { signal: dnsController.signal, timeoutMs: 100 });
+  dnsController.abort();
+  await assert.rejects(pendingDns, { status: 499 });
+  assert.equal(getEventListeners(dnsController.signal, "abort").length, 0);
+
+  const bodyController = new AbortController(); const body = network([{ hang: true }]);
+  const pendingBody = body.reader("https://example.test", { signal: bodyController.signal, timeoutMs: 100 });
+  await new Promise(resolve => setImmediate(resolve)); bodyController.abort();
+  await assert.rejects(pendingBody, { status: 499 });
+  assert.equal(body.calls[0].options.signal.aborted, true);
+  assert.equal(getEventListeners(bodyController.signal, "abort").length, 0);
+
+  const completed = new AbortController(); const success = network([{}]);
+  await success.reader("https://example.test", { signal: completed.signal });
+  assert.equal(getEventListeners(completed.signal, "abort").length, 0);
+  completed.abort(); assert.equal(success.calls[0].options.signal.aborted, false);
+  const alreadyCancelled = network([]);
+  await assert.rejects(alreadyCancelled.reader("https://example.test", { signal: completed.signal }), { status: 499 });
+  assert.equal(alreadyCancelled.dnsCalls.length, 0);
+});
+
+test("stalled request body is cancelled once and unlocked after its deadline", async () => {
+  let cancelled = 0;
+  const body = new ReadableStream({ cancel() { cancelled++; } });
+  const request = new Request("http://test", { method: "POST", body, duplex: "half" });
+  await assert.rejects(safety.readBoundedBody(request, 5, 10), { status: 408 });
+  assert.equal(cancelled, 1); assert.equal(body.locked, false);
+});
+
+test("guard rejects origin, MIME and declared size before inference or processing", async () => {
+  for (const path of ["src/app/api/text/reconstruct/route.ts", "src/app/api/documents/process/route.ts"]) {
+    const route = load(path, { "@/lib/server/http-safety": { ...safety, readRemote: () => assert.fail("network") } });
+    for (const [headers, status] of [
+      [{ origin: "https://evil.test" }, 403], [{ origin: "null" }, 403], [{ origin: "" }, 403],
+      [{ "sec-fetch-site": "cross-site" }, 403], [{ "content-type": "text/plain" }, 415],
+      [{ "content-type": "" }, 415], [{ "content-length": "4000001" }, 413], [{ "content-length": "bogus" }, 413],
+    ]) {
+      const response = await route.POST(jsonRequest({ text: "Texto.", source: "pastedText" }, headers));
+      assert.equal(response.status, status); assert.equal(response.headers.get("cache-control"), "no-store");
+    }
+  }
+});
+
+test("guard uses the public Host authority when Next has an internal URL", () => {
+  const guard = load("src/lib/server/request-guard.ts");
+  const policy = { scope: "origin-regression", contentTypes: ["application/json"], maxBodyBytes: 100, maxRequests: 20, windowMs: 10_000, maxConcurrent: 2 };
+  const acquire = guard.createRequestGuard();
+  const request = (url, host, origin, extra = {}) => new Request(url, {
+    method: "POST", body: "{}", headers: { "content-type": "application/json", ...(host !== null ? { host } : {}), origin, ...extra },
+  });
+  for (const [url, host, origin, headers] of [
+    ["http://localhost:3018/api/speech", "127.0.0.1:3018", "http://127.0.0.1:3018"],
+    ["http://127.0.0.1:3018/api/speech", "localhost:3018", "http://localhost:3018"],
+    ["https://internal.vercel.app/api/speech", "aplicacionparaleerenvozalta.vercel.app", "https://aplicacionparaleerenvozalta.vercel.app"],
+    ["http://localhost:3018/api/speech", "[::1]:3018", "http://[::1]:3018"],
+    ["http://localhost:3018/api/speech", null, "http://localhost:3018"],
+    ["http://localhost:3018/api/speech", "127.0.0.1:3018", "http://127.0.0.1:3018", { "x-forwarded-host": "evil.test", "x-forwarded-proto": "https" }],
+  ]) acquire(request(url, host, origin, headers), policy)();
+
+  for (const [url, host, origin, headers] of [
+    ["http://localhost:3018/api/speech", "127.0.0.1:3018", "http://localhost:3018"],
+    ["http://localhost:3018/api/speech", "127.0.0.1:3018", "http://127.0.0.1:3019"],
+    ["http://localhost:3018/api/speech", "127.0.0.1:3018", "https://127.0.0.1:3018"],
+    ["http://localhost:3018/api/speech", "127.0.0.1:3018", "https://evil.test", { "x-forwarded-host": "evil.test", "x-forwarded-proto": "https" }],
+    ["http://localhost:3018/api/speech", null, "https://evil.test", { "x-forwarded-host": "evil.test", "x-forwarded-proto": "https" }],
+    ["http://localhost:3018/api/speech", "127.0.0.1:3018", "http://127.0.0.1:3018", { "sec-fetch-site": "cross-site" }],
+    ...["", "user@127.0.0.1:3018", "127.0.0.1:3018/path", "127.0.0.1:3018,evil.test", "127.0.0.1:3018?query", "127.0.0.1:3018\\path"].map(host => ["http://127.0.0.1:3018/api/speech", host, "http://127.0.0.1:3018"]),
+  ]) assert.throws(() => acquire(request(url, host, origin, headers), policy), { status: 403 });
+});
+
+test("guard enforces quota, expiry, idempotent release, global cap and bounded capacity", () => {
+  const guard = load("src/lib/server/request-guard.ts"); let time = 1_000;
+  const acquire = guard.createRequestGuard({ now: () => time, maxEntries: 4 });
+  const policy = { scope: "synthetic", contentTypes: ["application/json"], maxBodyBytes: 100, maxRequests: 2, maxGlobalRequests: 3, windowMs: 10_000, maxConcurrent: 1 };
+  const release = acquire(jsonRequest({}), policy);
+  assert.throws(() => acquire(jsonRequest({}), policy), { status: 429, retryAfterSeconds: 1 });
+  release(); release(); acquire(jsonRequest({}), policy)();
+  assert.throws(() => acquire(jsonRequest({}), policy), { status: 429, retryAfterSeconds: 10 });
+  acquire(jsonRequest({}, { "x-forwarded-for": "8.8.8.8" }), policy)();
+  assert.throws(() => acquire(jsonRequest({}, { "x-forwarded-for": "1.1.1.1" }), policy), { status: 429 });
+  time += 10_000; acquire(jsonRequest({}), policy)();
+  acquire(jsonRequest({}, { "x-forwarded-for": "8.8.8.8" }), { ...policy, maxGlobalRequests: 100 })();
+  acquire(jsonRequest({}, { "x-forwarded-for": "1.1.1.1" }), { ...policy, maxGlobalRequests: 100 })();
+  assert.throws(() => acquire(jsonRequest({}, { "x-forwarded-for": "9.9.9.9" }), { ...policy, maxGlobalRequests: 100 }), { status: 429 });
+  time += 10_000; acquire(jsonRequest({}, { "x-forwarded-for": "9.9.9.9" }), policy)();
+});
+
+test("reconstruct returns 429/Retry-After and releases slots on fallback and errors", async () => {
+  const route = load("src/app/api/text/reconstruct/route.ts");
+  for (let index = 0; index < 6; index++) assert.equal((await route.POST(jsonRequest({ text: "Texto." }))).status, 200);
+  const limited = await route.POST(jsonRequest({ text: "Texto." }));
+  assert.equal(limited.status, 429); assert.ok(Number(limited.headers.get("retry-after")) > 0);
+  assert.equal(limited.headers.get("cache-control"), "no-store");
+});
+
+test("DOCX expansion and corrupt archives are rejected before Mammoth", async () => {
+  const route = load("src/app/api/documents/process/route.ts", { mammoth: { convertToHtml: () => assert.fail("Mammoth must not open rejected ZIP") } });
+  for (const [archive, status] of [
+    [Buffer.from("PK-broken"), 415],
+    [docxZip([{ name: "[Content_Types].xml", content: "<Types/>" }, { name: "word/document.xml", content: "x".repeat(50_000) }]), 413],
+    [docxZip([{ name: "[Content_Types].xml", content: "<Types/>" }, { name: "word/document.xml", content: "x".repeat(9 * 1024 * 1024), claimedSize: 1_000_000 }]), 413],
+    [docxZip([{ name: "[Content_Types].xml", content: "x" }, { name: "[Content_Types].xml", content: "x" }]), 415],
+  ]) assert.equal((await route.POST(fileRequest(archive, "sample.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"))).status, status);
+});
+
+test("PDF item, text and coordinate bounds run before geometry and clean up on rejection", async () => {
+  for (const [items, status] of [
+    [Array.from({ length: 8_001 }, () => ({ str: "x" })), 413],
+    [[{ str: "x".repeat(300_001) }], 413],
+    [[{ str: "Texto", transform: [1, 0, 0, 1, Infinity, 0] }], 422],
+    [[{ str: "Texto", width: NaN }], 422],
+  ]) {
+    let cleaned = 0; let destroyed = 0;
+    const route = load("src/app/api/documents/process/route.ts", { "pdfjs-dist/legacy/build/pdf.mjs": {
+      GlobalWorkerOptions: {}, getDocument: () => {
+        return { promise: Promise.resolve({ numPages: 1, getPage: async () => ({ getTextContent: async () => ({ items }), cleanup: () => cleaned++ }) }), destroy: async () => destroyed++ };
+      },
+    } });
+    assert.equal((await route.POST(fileRequest("%PDF-synthetic", "sample.pdf", "application/pdf"))).status, status);
+    assert.equal(cleaned, 1); assert.equal(destroyed, 1);
+  }
 });

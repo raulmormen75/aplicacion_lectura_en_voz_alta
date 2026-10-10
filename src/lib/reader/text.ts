@@ -3,7 +3,7 @@ import type { PlaybackRate, ReaderDocument, TextBlock, TextBlockKind, TextChunk,
 const GRAPHIC_SYMBOLS =
   /[\p{Extended_Pictographic}\u2190-\u21ff\u2600-\u27bf\u2900-\u297f\u2b00-\u2bff]/gu;
 const DECORATIVE_SYMBOLS = /[•·▪▫■□◆◇○●◦]/g;
-const INLINE_MARKERS = /[*_`~^|\\/#<>]/g;
+const INLINE_MARKERS = /[*_`~|\\#]/g;
 const EMOJI_COMPONENTS = /[\p{Emoji_Modifier}\p{Regional_Indicator}\u200d\ufe0e\ufe0f\u{e0020}-\u{e007f}]/gu;
 const LINE_SPACES = /[ \t\f\v]+/g;
 const WORD_PATTERN = /[\p{L}\p{M}\p{N}]+(?:['’´-][\p{L}\p{M}\p{N}]+)*/gu;
@@ -40,12 +40,8 @@ export function segmentTextBlocks(input: string) {
 }
 
 export function cleanTextWithoutInventing(input: string) {
-  const cleaned = cleanTextForSpeech(input)
-    .replace(/-\s+(?=[\p{Ll}\p{M}])/gu, "")
-    .replace(/\s+([.;,])/g, "$1")
-    .replace(/([\p{Ll}\p{M}])\s+([\p{Ll}\p{M}])\s+([\p{Ll}\p{M}])\b/gu, "$1$2$3");
-
-  return cleanTextForSpeech(cleaned);
+  // Spaced single letters may be variables, initials or words. Do not guess joins.
+  return cleanTextForSpeech(input);
 }
 
 export function createLegibleReconstructionPrompt(text: string) {
@@ -76,16 +72,30 @@ export function tokenizeWords(text: string): WordToken[] {
 }
 
 export function splitIntoChunks(text: string, targetWords = 140): TextChunk[] {
-  const blocks = segmentTextBlocks(text);
+  return chunksFromPreparedText(prepareTextForReading(text), targetWords);
+}
+
+function chunksFromPreparedText(
+  { cleanText, blocks }: ReturnType<typeof prepareTextForReading>,
+  targetWords = 140,
+): TextChunk[] {
+  const capacity = Number.isFinite(targetWords) && targetWords > 0
+    ? Math.max(1, Math.floor(targetWords)) : 140;
+  const pieces = blocks.flatMap((block) => splitLongBlock(block.text, block.wordCount, capacity)
+    .filter((piece) => piece.wordCount > 0)
+    .map((piece) => ({ ...piece, start: block.start + piece.start })));
   const chunks: TextChunk[] = [];
-  let buffer: string[] = [];
+  let startChar = 0;
   let startWord = 0;
   let currentWords = 0;
 
-  const pushChunk = () => {
-    const chunkText = buffer.join("\n\n").trim();
-    if (!chunkText) return;
+  pieces.forEach((piece, index) => {
+    currentWords += piece.wordCount;
+    if (currentWords < capacity && index < pieces.length - 1) return;
 
+    // Slice the one prepared document. Never re-clean or reassemble its sentences.
+    const endChar = pieces[index + 1]?.start ?? cleanText.length;
+    const chunkText = cleanText.slice(startChar, endChar).trim();
     chunks.push({
       id: `chunk-${chunks.length + 1}`,
       text: chunkText,
@@ -95,25 +105,9 @@ export function splitIntoChunks(text: string, targetWords = 140): TextChunk[] {
       language: detectLanguage(chunkText),
     });
     startWord += currentWords;
-    buffer = [];
+    startChar = endChar;
     currentWords = 0;
-  };
-
-  for (const block of blocks) {
-    const pieces = splitLongBlock(block.text, targetWords);
-
-    for (const piece of pieces) {
-      const pieceWords = countWords(piece);
-      if (pieceWords === 0) continue;
-
-      buffer.push(piece);
-      currentWords += pieceWords;
-
-      if (currentWords >= targetWords) pushChunk();
-    }
-  }
-
-  if (buffer.length > 0) pushChunk();
+  });
 
   return chunks;
 }
@@ -191,7 +185,7 @@ export function createDocumentFromText(params: {
   const preparedText = prepareTextForReading(params.text);
   const cleanText = preparedText.cleanText;
   const wordCount = countWords(cleanText);
-  const chunks = splitIntoChunks(cleanText);
+  const chunks = chunksFromPreparedText(preparedText);
   const detectedLanguage = detectLanguage(cleanText);
   const needsReview = wordCount === 0 || incoherenceScore(cleanText) > 0.22;
   const qualityStatus =
@@ -234,14 +228,14 @@ export function incoherenceScore(text: string) {
 }
 
 function buildRawBlocks(input: string) {
-  const normalizedInput = removeCitationReferences(input)
+  const normalizedInput = input
     .replace(/[0-9#*]\ufe0f?\u20e3/gu, " ")
     .replace(EMOJI_COMPONENTS, "")
     .normalize("NFKC")
     .replace(/\r\n?/g, "\n")
     .replace(/\u00a0/g, " ")
     .replace(GRAPHIC_SYMBOLS, " ");
-  const parsedLines = normalizedInput.split("\n").map(parseLine);
+  const parsedLines = removeCitationReferences(normalizedInput).split("\n").map(parseLine);
   const blocks: RawBlock[] = [];
   let paragraphLines: string[] = [];
 
@@ -307,9 +301,7 @@ function parseLine(rawLine: string): ParsedLine {
 
 function cleanLineText(line: string) {
   if (/^\s*(?:={3,}|-{3,}|(?:\*\s*){3,}|(?:_\s*){3,})\s*$/.test(line)) return "";
-  return line
-    .replace(/\+/g, " más ")
-    .replace(/=/g, " igual a ")
+  return verbalizeMathOperators(line)
     .replace(DECORATIVE_SYMBOLS, " ")
     .replace(INLINE_MARKERS, " ")
     .replace(/[{}\[\]]/g, " ")
@@ -319,6 +311,34 @@ function cleanLineText(line: string) {
     .replace(/([¿¡])\s+/g, "$1")
     .replace(LINE_SPACES, " ")
     .trim();
+}
+
+function verbalizeMathOperators(line: string) {
+  const spoken: Record<string, string> = {
+    "+": "más", "=": "igual a", "<=": "menor o igual que", ">=": "mayor o igual que",
+    "!=": "distinto de", "≤": "menor o igual que", "≥": "mayor o igual que", "≠": "distinto de",
+    "×": "por", "÷": "dividido entre", "*": "por", "/": "dividido entre", "^": "elevado a",
+    "<": "menor que", ">": "mayor que",
+  };
+  const operand = (index: number, direction: -1 | 1) => {
+    while (index >= 0 && index < line.length && /\s/u.test(line[index])) index += direction;
+    if (direction === 1 && /[+-]/u.test(line[index] ?? "")) {
+      index += direction;
+      while (index < line.length && /\s/u.test(line[index])) index += direction;
+    }
+    if (direction === -1 ? /[)\]]/u.test(line[index] ?? "") : /[(\[]/u.test(line[index] ?? "")) return true;
+    const edge = index;
+    while (index >= 0 && index < line.length && /[\p{L}\p{M}\p{N}]/u.test(line[index])) index += direction;
+    const token = direction === -1 ? line.slice(index + 1, edge + 1) : line.slice(edge, index);
+    // Numeric values and individual algebraic variables, not slashes in URLs/prose.
+    return /^(?:\p{N}+|\p{L}[\p{M}\p{N}]*)$/u.test(token);
+  };
+  return line.replace(/<=|>=|!=|[+=≤≥≠×÷*/^<>]/gu, (operator: string, offset: number) => {
+    if (operator === "/" && line.slice(offset - 1, offset + 2).toLowerCase() === "y/o") return operator;
+    if (["*", "/", "^", "<", ">", "<=", ">="].includes(operator) &&
+        !(operand(offset - 1, -1) && operand(offset + operator.length, 1))) return operator;
+    return ` ${spoken[operator]} `;
+  });
 }
 
 function classifyLine(
@@ -391,7 +411,7 @@ function getUppercaseRatio(text: string) {
 function joinParagraphLines(lines: string[]) {
   return lines.reduce((paragraph, line) => {
     if (!paragraph) return line;
-    if (paragraph.endsWith("-") && /^[\p{Ll}\p{M}]/u.test(line)) {
+    if (paragraph.endsWith("-") && /[\p{L}\p{M}]{2}-$/u.test(paragraph.slice(-5)) && /^[\p{Ll}\p{M}]{2}/u.test(line)) {
       return `${paragraph.slice(0, -1)}${line}`;
     }
 
@@ -426,30 +446,50 @@ function createTextBlocks(rawBlocks: RawBlock[]) {
   return blocks;
 }
 
-function splitLongBlock(text: string, targetWords: number) {
-  if (countWords(text) <= targetWords) return [text];
+const ABBREVIATIONS = new Set([
+  "dr.", "dra.", "sr.", "sra.", "srta.", "ud.", "uds.", "etc.", "aprox.",
+  "p.", "pp.", "pág.", "págs.", "ej.", "fig.", "núm.", "no.", "art.", "vol.", "e.g.", "i.e.",
+]);
 
-  const sentences = text.match(/[^.!?¿¡]+[.!?¿¡]?/g) ?? [text];
-  const pieces: string[] = [];
-  let buffer: string[] = [];
-  let words = 0;
+function isAbbreviation(value: string) {
+  let end = value.length;
+  while (end > 0 && /[)\]"'»”’]/u.test(value[end - 1])) end--;
+  const word = value.slice(0, end).toLowerCase();
+  return ABBREVIATIONS.has(word) || /^(?:\p{L}\.)+$/u.test(word);
+}
 
-  for (const sentence of sentences) {
-    const cleanSentence = sentence.trim();
-    if (!cleanSentence) continue;
-
-    buffer.push(cleanSentence);
-    words += countWords(cleanSentence);
-
-    if (words >= targetWords) {
-      pieces.push(buffer.join(" ").trim());
-      buffer = [];
-      words = 0;
+function splitLongBlock(text: string, wordCount: number, targetWords: number) {
+  if (wordCount <= targetWords) return [{ start: 0, wordCount }];
+  // Whitespace boundaries keep decimals, dotted initials and opening punctuation intact.
+  const units = Array.from(text.matchAll(/\S+/gu), (match) => ({
+    start: match.index, text: match[0], wordCount: countWords(match[0]),
+  }));
+  const pieces: Array<{ start: number; wordCount: number }> = [];
+  let start = 0;
+  while (start < units.length) {
+    let words = 0;
+    let end = start;
+    let sentenceEnd = start;
+    let sentenceWords = 0;
+    while (end < units.length) {
+      const unit = units[end++];
+      words += unit.wordCount;
+      const abbreviation = isAbbreviation(unit.text);
+      if (!abbreviation && /[.!?][)\]"'»”’]*$/u.test(unit.text)) {
+        sentenceEnd = end;
+        sentenceWords = words;
+      }
+      if (words >= targetWords && !abbreviation) {
+        if (sentenceEnd > start && sentenceWords >= targetWords * 0.5) {
+          end = sentenceEnd;
+          words = sentenceWords;
+        }
+        break;
+      }
     }
+    pieces.push({ start: units[start].start, wordCount: words });
+    start = end;
   }
-
-  if (buffer.length > 0) pieces.push(buffer.join(" ").trim());
-
   return pieces;
 }
 
@@ -470,7 +510,8 @@ function isBracketCitation(value: string) {
 }
 
 function isCitationText(value: string) {
-  const text = value.replace(/\s+/g, " ").trim();
+  // Inline emphasis may surround an author/year. Parse its plain form only here.
+  const text = value.replace(/[*_`~]/g, "").replace(/\s+/g, " ").trim();
   if (!text) return false;
 
   if (/^(?:ibid\.?|idem|op\.?\s*cit\.?)$/i.test(text)) return true;
@@ -480,15 +521,44 @@ function isCitationText(value: string) {
   return text.split(/\s*;\s*/).every(isAuthorDateReference);
 }
 
-const AUTHOR_WORD = String.raw`\p{Lu}[\p{L}\p{M}'’.-]*`;
-const AUTHOR_NAME = String.raw`(?:(?:de|del|la|las|los|van|von)\s+)*${AUTHOR_WORD}(?:\s+(?:(?:de|del|la|las|los|van|von|of|the|y|and)\s+)*${AUTHOR_WORD})*`;
-const AUTHORS = String.raw`${AUTHOR_NAME}(?:(?:,\s*|\s+(?:y|and|&)\s+)${AUTHOR_NAME})*(?:\s+et\s+al\.?)?`;
-const REFERENCE_DATE = String.raw`(?:(?:18|19|20)\d{2}[a-z]?|s\.\s*f\.)`;
-const AUTHOR_DATE_REFERENCE = new RegExp(
-  String.raw`^${AUTHORS},\s*${REFERENCE_DATE}(?:\s*,\s*${REFERENCE_DATE})*(?:\s*,\s*(?:pp?\.|págs?\.)\s*\d+(?:\s*[-–]\s*\d+)?)?$`,
-  "u",
-);
+const NAME_PREFIXES = new Set(["de", "del", "la", "las", "los", "van", "von"]);
+const NAME_JOINERS = new Set([...NAME_PREFIXES, "of", "the", "y", "and"]);
+
+function isReferenceDate(value: string) {
+  return /^(?:18|19|20)\d{2}[a-z]?$/u.test(value) || /^s\.\s*f\.$/u.test(value);
+}
+
+function isAuthorList(value: string) {
+  const authors = value.replace(/ et al\.?$/u, "");
+  const tokens = authors.match(/[, &]|[^ ,&]+/gu) ?? [];
+  let hasName = false;
+  let needsName = true;
+  for (const token of tokens) {
+    if (token === " ") continue;
+    if (token === "," || token === "&") {
+      if (!hasName || needsName) return false;
+      hasName = false;
+      needsName = true;
+    } else if (/^\p{Lu}[\p{L}\p{M}'’.-]*$/u.test(token)) {
+      hasName = true;
+      needsName = false;
+    } else if ((hasName ? NAME_JOINERS : NAME_PREFIXES).has(token)) {
+      needsName = true;
+    } else {
+      return false;
+    }
+  }
+  return hasName && !needsName;
+}
 
 function isAuthorDateReference(text: string) {
-  return AUTHOR_DATE_REFERENCE.test(text);
+  // Comma-separated fields are consumed once. No ambiguous author/name partitions.
+  const fields = text.split(",").map((field) => field.trim());
+  if (fields.length < 2 || fields.some((field) => !field)) return false;
+  const firstDate = fields.findIndex((field, index) => index > 0 && isReferenceDate(field));
+  if (firstDate < 1 || !isAuthorList(fields.slice(0, firstDate).join(", "))) return false;
+  let index = firstDate;
+  while (index < fields.length && isReferenceDate(fields[index])) index++;
+  return index === fields.length || index === fields.length - 1 &&
+    /^(?:pp?\.|págs?\.)\s*\d+(?:\s*[-–]\s*\d+)?$/u.test(fields[index]);
 }
