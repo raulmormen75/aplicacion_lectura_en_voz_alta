@@ -1,27 +1,31 @@
-# Objetivo: lectura fluida para uso personal
+# Objetivo: reproducción fluida para uso personal
 
-Mejorar En voz, corregir el diagnóstico y publicar cambios verificados en GitHub y Vercel.
+Mejorar En voz y publicar cambios comprobados en GitHub y Vercel.
 
-Verificación de producción completada el 10 de octubre de 2026 UTC (9 de octubre en México): commit `9cc4e1a`, Vercel READY, CI satisfactoria y ambas voces remotas devuelven audio real. Evidencias, tiempos y mejoras pendientes en `INFORME_MEJORAS_2026_10_10.md`.
+Las indicaciones del 9 de octubre de 2026 en México sustituyen la integración de Hugging Face por voces del dispositivo en español. El informe `INFORME_MEJORAS_2026_10_10.md` conserva los resultados de la etapa anterior; README describe el funcionamiento actual.
 
-## Condiciones
+## Condiciones actuales
 
-- Navegar entre líneas y párrafos sin diálogos de preparación de voz.
-- No descargar ni guardar modelos de voz automáticamente en el navegador.
-- Mantener una ruta gratuita de lectura con las voces disponibles del dispositivo.
-- Evaluar voces femeninas de Hugging Face, dando preferencia a México y Latinoamérica, sin Azure ni servicios de pago.
-- Ofrecer voces remotas únicamente cuando su API se haya probado, indicando sus límites y el envío de fragmentos al proveedor.
-- Reutilizar audio preparado, anticipar fragmentos próximos y descartar respuestas de una reproducción cancelada.
-- Corregir la fidelidad del texto, importación, controles, accesibilidad, privacidad y seguridad.
+- Mostrar en el botón inferior todas las voces en español que exponga el navegador, con México primero y sin explicaciones técnicas en el menú.
+- Actualizar la detección al abrir la aplicación, abrir el menú, volver a la pestaña y mediante Actualizar voces.
+- No utilizar Hugging Face, Azure ni APIs de pago para reproducir documentos.
+- No descargar ni guardar modelos de voz en el navegador.
+- Quitar la ventana de ajustes, el selector de idioma, el interruptor temporal y sus avisos informativos.
+- Colocar el tamaño del texto en los controles inferiores y en pantalla completa.
+- Guardar automáticamente documento, avance y preferencias en el mismo navegador, sin avisos en el funcionamiento normal.
+- Mantener saltos por línea y párrafo sin diálogos de preparación, además de pausa, reanudación y cambio de velocidad.
+- Alinear etiquetas y controles, y comprobar escritorio y móvil.
+- Conservar las protecciones de importación y de los endpoints documentales.
 
 ## Verificación para publicar
 
-- Pruebas de regresión de texto, límites de importación, almacenamiento y reproducción.
-- Análisis estático y compilación de producción satisfactorios.
-- Comprobar la navegación, pausa/reanudación, voz de respaldo y uso temporal en navegador.
+- Pruebas de catálogo en español, selección manual y ausencia de respaldo en inglés.
+- Pruebas de recuperación del documento, avance y preferencias.
+- Análisis estático y compilación de producción.
+- Comprobaciones en navegador aislado a 1280, 914, 390 y 320 px, incluida pantalla completa.
 - Commit y actualización de GitHub sin sobrescribir cambios ajenos.
-- Comprobar que Vercel publique el commit y que la aplicación responda.
+- Comprobar que Vercel publique el commit y que el dominio responda.
 
-Las demos gratuitas compartidas pueden tener colas, cuotas o interrupciones. La documentación de un modelo no prueba su calidad audible ni garantiza un servicio de lectura continua. Las conclusiones y verificaciones reales de esta iteración se registran en el informe de cambios.
+La aplicación solo puede utilizar las voces que el navegador le entregue. No puede instalar voces ni garantizar una voz mexicana, calidad natural o funcionamiento sin conexión en todos los equipos.
 
-Este archivo conserva el objetivo del proyecto. La activación nativa de `/goal` depende del cliente Codex y no se simula mediante este archivo.
+Este archivo conserva el objetivo del proyecto. La activación nativa de `/goal` depende del cliente Codex.

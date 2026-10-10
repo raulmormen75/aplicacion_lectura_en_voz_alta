@@ -329,7 +329,7 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* Reading preferences and temporary audio share the existing book layout. */
+/* Text size and device controls share the existing book layout. */
 .book-layout .book-page-heading h1 {
   min-width: 0;
   margin: 0;
@@ -346,46 +346,10 @@
   outline-offset: 3px;
 }
 
-.book-layout .reading-settings {
-  position: fixed;
-  z-index: 90;
-  top: max(16px, env(safe-area-inset-top, 0px));
-  right: max(16px, env(safe-area-inset-right, 0px));
-  display: grid;
-  gap: 14px;
-  width: min(440px, calc(100vw - 32px));
-  max-height: calc(100dvh - 32px);
-  overflow: auto;
-  padding: 20px;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: var(--book-chrome);
-  color: var(--ivory);
-  box-shadow: 0 12px 40px #0005;
-}
-
-.book-layout .reading-settings-heading {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 12px;
-}
-
-.book-layout .reading-settings h2 {
-  margin: 0;
-  font-size: 18px;
-}
-
-.book-layout .reading-settings label {
-  display: grid;
-  gap: 6px;
-  font-size: 14px;
-}
-
-.book-layout :is(.reading-settings, .speed-control) select {
+.book-layout :is(.speed-control, .text-size-control) select {
   min-width: 0;
-  min-height: 40px;
-  border: 1px solid #777;
+  min-height: 44px;
+  border: 1px solid var(--border);
   border-radius: 5px;
   padding: 6px 9px;
   background: #292b29;
@@ -393,45 +357,17 @@
   font: inherit;
 }
 
-.book-layout .speed-control {
-  gap: 6px;
-  font-size: 12px;
-}
-
-.book-layout .reading-settings .temporary-reading {
+.book-layout :is(.speed-control, .text-size-control) {
   display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  line-height: 1.5;
-}
-
-.book-layout .temporary-reading input {
-  width: 20px;
-  height: 20px;
-  flex-shrink: 0;
-}
-
-.book-layout .reading-settings p,
-.book-layout .voice-credit p {
-  margin: 0;
-  font-size: 12px;
-  line-height: 1.5;
-}
-
-.book-layout .reading-settings button,
-.book-layout .reading-settings-button,
-.book-layout .focus-settings-action {
-  display: inline-flex;
   align-items: center;
-  justify-content: center;
   gap: 8px;
-  min-width: 44px;
   min-height: 44px;
-  border: 1px solid var(--border);
-  border-radius: 5px;
-  padding: 8px;
-  background: transparent;
-  color: var(--ivory);
+  font-size: 12px;
+  line-height: 1.2;
+}
+
+.book-layout .control-label {
+  flex-shrink: 0;
 }
 
 .book-layout .playback-notice {
@@ -581,11 +517,12 @@
   width: 100%;
   max-width: 1040px;
   margin: 0 auto;
-  grid-template-columns: auto auto auto 44px;
+  grid-template-columns: auto auto auto auto 44px;
   grid-template-areas:
-    "readout transport transport transport"
-    "rule rule rule rule"
-    "voice speed nav reset";
+    "readout transport transport transport transport"
+    "rule rule rule rule rule"
+    "voice speed size nav reset";
+  align-items: center;
   justify-content: center;
   gap: 8px 16px;
 }
@@ -609,6 +546,10 @@
 .book-layout .player-action-row > .speed-control {
   grid-area: speed;
   justify-self: start;
+}
+
+.book-layout .player-action-row > .text-size-control {
+  grid-area: size;
 }
 
 .book-layout .player-action-row > .reset-button {
@@ -692,12 +633,13 @@
   height: 25px;
 }
 
-.book-layout .speed-control {
+.book-layout :is(.speed-control, .text-size-control) {
   width: max-content;
   max-width: 100%;
-  gap: 2px;
   padding: 0;
-  background: #ffffff06;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
 }
 
 .book-layout .speed-control button {
@@ -752,8 +694,9 @@
 .book-layout .voice-model-button span {
   display: inline;
   min-width: 0;
-  white-space: normal;
-  overflow-wrap: anywhere;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 .book-layout .player-dock .voice-model-selector {
@@ -764,11 +707,40 @@
   left: max(12px, env(safe-area-inset-left, 0px));
   bottom: calc(100% + 8px);
   width: min(300px, calc(100vw - 24px));
-  max-height: max(44px, calc(100dvh - var(--player-dock-height, 176px) - 36px));
+  max-height: min(320px, max(44px, calc(100dvh - var(--player-dock-height, 176px) - 36px)));
   overflow-y: auto;
   overscroll-behavior: contain;
   transform: none;
   background: var(--book-chrome);
+}
+
+.book-layout .voice-model-menu button {
+  min-height: 44px;
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.book-layout .voice-model-menu button span {
+  font: inherit;
+}
+
+.book-layout .voice-model-menu .refresh-device-voices {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-top: 1px solid var(--border);
+  border-radius: 0;
+  color: var(--muted);
+}
+
+.book-layout .voice-menu-empty {
+  margin: 0;
+  padding: 10px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
 }
 
 .book-layout .progress-strip {
@@ -960,7 +932,7 @@
   }
 
   .book-layout .player-main-controls {
-    grid-template-columns: minmax(0, 1fr) auto auto 44px;
+    grid-template-columns: minmax(0, 1fr) auto auto auto 44px;
   }
 
   .book-layout .time-pill {
@@ -1065,10 +1037,10 @@
   }
 
   .book-layout .player-main-controls {
-    grid-template-columns: minmax(0, 1fr) 96px 44px;
+    grid-template-columns: minmax(0, 1fr) auto 44px;
     grid-template-areas:
       "transport transport transport"
-      "speed speed reset"
+      "speed size reset"
       "rule rule rule"
       "readout voice voice"
       "nav nav nav";
@@ -1257,4 +1229,16 @@
     transition: none;
     animation: none;
   }
+}
+
+@media (max-width: 359px) {
+  .book-layout .player-action-row > :is(.speed-control, .text-size-control) {
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+  }
+}
+
+.book-layout .focus-control-dock .text-size-control {
+  flex: 0 0 auto;
 }

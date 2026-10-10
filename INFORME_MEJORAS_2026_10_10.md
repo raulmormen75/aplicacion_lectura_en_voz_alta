@@ -1,5 +1,7 @@
 # En voz: mejoras y verificación
 
+Este informe describe la etapa anterior. Las voces de Hugging Face y la ventana de ajustes se retiraron siguiendo las indicaciones posteriores del usuario; README y GOAL.md describen el funcionamiento actual con voces del dispositivo en español y guardado automático.
+
 Fecha: 10 de octubre de 2026 (UTC; investigación iniciada el 9 de octubre, hora de México).
 
 ## Objetivo y resultado de código

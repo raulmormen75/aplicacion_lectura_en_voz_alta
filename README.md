@@ -4,19 +4,15 @@ Aplicación personal para leer PDF, DOCX, TXT/Markdown, texto pegado y sitios p�
 
 ## Voces y reproducción
 
-- **Dispositivo** es la opción inicial. No descarga modelos. Prioriza las voces de español de México disponibles y permite elegir una voz concreta en Ajustes. La calidad y disponibilidad dependen del navegador y sistema; una voz del sistema puede usar el servicio remoto de su proveedor.
-- **México · HF** usa la demo oficial Chatterbox es-MX/LatAm y su referencia `es_mx_f1.wav`, obtenida de la configuración actual de la demo. Es una opción experimental con cola y cuota de Hugging Face ZeroGPU.
-- **Dora · HF** usa Kokoro `ef_dora` mediante la demo española comunitaria de leonelhs. Dora está documentada como femenina española; el catálogo no confirma acento mexicano.
+El botón inferior de voces muestra únicamente las voces en español que expone el navegador. Incluye todas las variantes regionales y ambos géneros, sin duplicar entradas idénticas; ordena primero México, luego otras regiones latinoamericanas y finalmente España o español sin región. No descarga ni guarda modelos de voz.
 
-Al elegir una demo, se envían fragmentos de texto a Hugging Face. La aplicación recibe WAV, mantiene un búfer temporal de hasta 16 MiB/32 entradas y no guarda modelos ni audio en IndexedDB, CacheStorage o el servidor. El proveedor puede conservar los archivos generados según sus políticas: no se garantiza eliminación por parte del proveedor. No uses una demo pública para documentos confidenciales.
+La selección inicial prefiere una voz femenina mexicana cuando está disponible. Elegir otra voz conserva el punto del documento y la preferencia queda guardada en ese navegador. La detección se actualiza al abrir la aplicación o el menú, con el evento `voiceschanged`, al volver a la pestaña y con **Actualizar voces**. El menú también hace consultas breves para catálogos que aparecen tarde.
 
-Las voces remotas no son streaming: una sección nueva requiere generación completa y puede esperar por la cola. En pruebas con una frase pública, ambas APIs entregaron audio, con unos 9 segundos hasta generación y 12 segundos hasta descarga desde el entorno de prueba. No es un benchmark de tu dispositivo ni de documentos largos, ni una evaluación audible de calidad.
+La aplicación no puede instalar voces ni obligar al navegador a exponer voces ausentes. Si no encuentra ninguna en español, lo indica al solicitar reproducción y no utiliza una voz inglesa por defecto. La calidad, la disponibilidad y el uso de conexión a Internet de cada voz dependen del sistema y navegador. La [especificación Web Speech API, §§4.2.2 y 4.2.8](https://webaudio.github.io/web-speech-api/) describe esta diferencia entre voces locales y servicios remotos del navegador.
 
-Los fragmentos tienen límites estables, se reutilizan al saltar dentro de ellos y se anticipan las siguientes secciones. El reproductor cambia de posición dentro del audio preparado; las respuestas de sesiones canceladas no inician otra lectura. Los saltos no muestran diálogos de carga. Si una demo falla, se informa de forma visible y el selector cambia a Dispositivo; pausa y reanudación siguen al proveedor activo.
+Hugging Face y su API de audio se retiraron. La aplicación no tiene cuotas de generación de Hugging Face ni requiere claves para reproducir con voces del dispositivo. El código histórico de Laura/Piper y su atribución permanecen para trazabilidad; no se publican modelos ni se usan automáticamente. La caché antigua de Laura se elimina al abrir la aplicación.
 
-La integración anterior de Laura se retiró de la selección de lectura. Su caché de modelo se elimina al abrir esta versión. El modelo de 63 MB ya no se publica; el código histórico y la atribución permanecen para trazabilidad, sin descarga ni uso automático. No se utiliza Azure ni una API de pago.
-
-El resaltado de audio remoto es aproximado, basado en duración y actividad del audio. Los botones de segundos usan el reloj real dentro del fragmento remoto activo; fuera de ese fragmento y con voces del dispositivo se estima el destino por palabras. El tiempo restante siempre es una estimación.
+Los controles inferiores incluyen velocidad y tamaño del texto; también están disponibles en pantalla completa. Los saltos entre líneas y párrafos no muestran diálogos de preparación. Los botones de segundos y el tiempo restante son estimaciones por palabras. El resaltado utiliza eventos de palabra cuando el motor los proporciona, con estimación temporal como respaldo.
 
 ## Importación y privacidad
 
@@ -26,7 +22,7 @@ DOCX valida el ZIP y su expansión real antes de Mammoth. En cliente se permiten
 
 OCR con Tesseract requiere descargar su motor e idiomas. Esto es independiente de las voces. Revisa nombres, cifras, tablas y fórmulas del resultado. La limpieza no une variables separadas y conserva/verbaliza operaciones; bloques, fragmentos e índices se crean a partir de una sola preparación del texto.
 
-Por defecto, documentos y avance se conservan localmente. **Lectura temporal**, en Ajustes, detiene el autoguardado durante esta sesión; los datos anteriores se conservan. **Borrar datos del lector** elimina las versiones documentales y el estado anterior, detiene reproducción y activa lectura temporal. Solo queda una revisión sin datos personales para impedir que una pestaña antigua restaure el contenido. El botón puede completar un borrado interrumpido; la carga nunca lo hace automáticamente.
+Documentos, avance, voz elegida y tamaño del texto se guardan automáticamente en el mismo navegador y se recuperan al volver. El documento se conserva en IndexedDB; el punto de reproducción y las preferencias, en un registro local compacto. No hay ventana de ajustes, selector de idioma ni interruptor de sesión temporal. Para eliminar lo conservado se pueden borrar los datos de este sitio desde el navegador. Los errores reales de almacenamiento se muestran para evitar aparentar que el avance se guardó.
 
 Los sitios públicos se descargan en el servidor con límites, validación DNS/pinning y protección contra destinos privados. La reconstrucción con IA es opcional, solo aparece cuando se configura y envía texto únicamente al solicitarla. No se sincroniza entre dispositivos.
 
@@ -44,11 +40,11 @@ npx playwright install chromium
 npm run test:browser
 ```
 
-Abre `http://localhost:3000`. Predev/prebuild preparan recursos PDF.js/Tesseract desde las dependencias; no hay que subirlos. La compilación genera el shell offline de la PWA. Offline puede recuperar la interfaz y documentos guardados después de una visita completa, pero no permite generar voces remotas ni garantiza OCR sin recursos descargados.
+Abre `http://localhost:3000`. Predev/prebuild preparan recursos PDF.js/Tesseract desde las dependencias; no hay que subirlos. La compilación genera el shell offline de la PWA. Offline puede recuperar la interfaz y documentos guardados después de una visita completa. La reproducción sin conexión depende de que la voz del dispositivo sea local; OCR necesita sus recursos descargados.
 
-La API `/api/speech` acepta solo las dos voces y fragmentos breves. Valida origen, tipo, bytes, URLs de audio del mismo Space y WAV. Sus cuotas/concurrencia se guardan en memoria acotada por proceso y no son un control distribuido ni autenticación. CSP limita recursos y conserva `unsafe-inline` para el shell estático de Next. Las respuestas con documento o audio usan `no-store`.
+CSP limita recursos y conserva `unsafe-inline` para el shell estático de Next. Las respuestas con documentos usan `no-store`. La antigua API `/api/speech` ya no se publica.
 
-La prueba de navegador inicia el servidor compilado y usa perfiles aislados, texto público de prueba y un WAV generado para comprobar transporte, saltos de línea/párrafo, respaldo, pantalla completa y privacidad en escritorio y móvil. También comprueba la protección de origen en la API real y una recarga offline con preparación de texto local. `READER_VERIFY_HF_LIVE=1 npm run test:browser` añade dos generaciones reales en las demos públicas, sujetas a su disponibilidad y cuota.
+La prueba de navegador inicia el servidor compilado y usa perfiles aislados y un catálogo de voces simulado. Comprueba los anchos 1280, 914, 390 y 320 px: detección tardía, filtro de español, actualización del catálogo, teclado, selección, transporte, tamaño del texto, alineación, persistencia y recuperación del documento, pantalla completa y ausencia de solicitudes de TTS remoto. También comprueba que una voz inglesa no sea el respaldo y una recarga offline con preparación local. Estas pruebas verifican el comportamiento de la aplicación; no evalúan calidad audible ni la presencia real de una voz en el equipo del usuario.
 
 GitHub Actions verifica instalación, tests, lint, build y navegador en Node 24. Vercel compila automáticamente los cambios en `main`; un build local no prueba que ya estén publicados.
 
