@@ -1,4 +1,4 @@
-import type { PlaybackRate, ReaderDocument, TextBlock, TextBlockKind, TextChunk, WordToken } from "./types";
+import type { PlaybackRate, ReaderDocument, SourceTextBlock, TextBlock, TextBlockKind, TextChunk, WordToken } from "./types";
 
 const GRAPHIC_SYMBOLS =
   /[\p{Extended_Pictographic}\u2190-\u21ff\u2600-\u27bf\u2900-\u297f\u2b00-\u2bff]/gu;
@@ -24,8 +24,8 @@ export function cleanTextForSpeech(input: string) {
   return prepareTextForReading(input).cleanText;
 }
 
-export function prepareTextForReading(input: string) {
-  const rawBlocks = buildRawBlocks(input);
+export function prepareTextForReading(input: string, sourceBlocks?: readonly SourceTextBlock[]) {
+  const rawBlocks = sourceBlocks?.length ? cleanSourceBlocks(sourceBlocks) : buildRawBlocks(input);
   const cleanText = rawBlocks.map((block) => block.text).join("\n\n").trim();
   const blocks = createTextBlocks(rawBlocks);
 
@@ -178,11 +178,12 @@ export function createDocumentFromText(params: {
   source: ReaderDocument["source"];
   sourceLabel: string;
   text: string;
+  sourceBlocks?: readonly SourceTextBlock[];
   qualityStatus?: ReaderDocument["quality"]["status"];
   qualityMessage?: string;
   ocrAvailable?: boolean;
 }) {
-  const preparedText = prepareTextForReading(params.text);
+  const preparedText = prepareTextForReading(params.text, params.sourceBlocks);
   const cleanText = preparedText.cleanText;
   const wordCount = countWords(cleanText);
   const chunks = chunksFromPreparedText(preparedText);
@@ -227,14 +228,32 @@ export function incoherenceScore(text: string) {
   return Math.min(1, symbols / words + veryShortTokens / words);
 }
 
-function buildRawBlocks(input: string) {
-  const normalizedInput = input
+function normalizeTextInput(input: string) {
+  return input
     .replace(/[0-9#*]\ufe0f?\u20e3/gu, " ")
     .replace(EMOJI_COMPONENTS, "")
     .normalize("NFKC")
     .replace(/\r\n?/g, "\n")
     .replace(/\u00a0/g, " ")
     .replace(GRAPHIC_SYMBOLS, " ");
+}
+
+function cleanSourceBlocks(sourceBlocks: readonly SourceTextBlock[]): RawBlock[] {
+  // Keep recovered semantics; the generic short-line guesses are only for plain text.
+  return sourceBlocks.flatMap((block) => {
+    const normalized = removeCitationReferences(normalizeTextInput(block.text));
+    const lines = normalized.split("\n").map((line) => {
+      // Unordered markers are drawn by the reader. Preserve numbered list labels.
+      const content = block.kind === "bullet" ? line.replace(/^\s*[-*\u2022\u00b7\u25aa\u25ab\u25a0\u25a1\u25c6\u25c7\u25cb\u25cf\u25e6]\s+/, "") : line;
+      return cleanLineText(content);
+    });
+    const text = joinParagraphLines(lines.filter(Boolean));
+    return text ? [{ kind: block.kind, text }] : [];
+  });
+}
+
+function buildRawBlocks(input: string) {
+  const normalizedInput = normalizeTextInput(input);
   const parsedLines = removeCitationReferences(normalizedInput).split("\n").map(parseLine);
   const blocks: RawBlock[] = [];
   let paragraphLines: string[] = [];

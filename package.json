@@ -14,7 +14,8 @@
     "start": "next start",
     "lint": "eslint",
     "test": "node --experimental-strip-types --test --test-isolation=none tests/*.test.mjs",
-    "test:browser": "node tests/browser-reader.mjs"
+    "test:browser": "node tests/browser-reader.mjs",
+    "test:browser:pdf": "node tests/browser-pdf-import.mjs"
   },
   "dependencies": {
     "@mozilla/readability": "^0.6.0",

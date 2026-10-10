@@ -16,6 +16,8 @@ Las indicaciones del 9 de octubre de 2026 en México sustituyen la integración 
 - Mantener saltos por línea y párrafo sin diálogos de preparación, además de pausa, reanudación y cambio de velocidad.
 - Alinear etiquetas y controles, y comprobar escritorio y móvil.
 - Conservar las protecciones de importación y de los endpoints documentales.
+- Reconstruir localmente títulos, subtítulos, párrafos, líneas y listas de PDF, usando etiquetas fiables o geometría; preservar párrafos y cajas de OCR cuando existan.
+- Mostrar durante la importación de PDF un aviso central con el fondo desenfocado, avance, Cancelar/Escape y aclaración de las posibles diferencias de fidelidad. Conservar el documento anterior ante cancelación o error.
 
 ## Verificación para publicar
 
@@ -23,6 +25,7 @@ Las indicaciones del 9 de octubre de 2026 en México sustituyen la integración 
 - Pruebas de recuperación del documento, avance y preferencias.
 - Análisis estático y compilación de producción.
 - Comprobaciones en navegador aislado a 1280, 914, 390 y 320 px, incluida pantalla completa.
+- Pruebas de estructura y orden de PDF, límites y conservación de bloques e índices; PDFs auténticos sintéticos en navegador a 914 y 390 px, incluidos aviso, cancelación, autoguardado, recarga e integración OCR.
 - Commit y actualización de GitHub sin sobrescribir cambios ajenos.
 - Comprobar que Vercel publique el commit y que el dominio responda.
 

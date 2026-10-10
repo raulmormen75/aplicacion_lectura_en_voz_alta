@@ -1,12 +1,16 @@
 import type { PDFDocumentLoadingTask, PDFDocumentProxy, PDFPageProxy, RenderTask } from "pdfjs-dist";
 import type { Worker as OcrWorker } from "tesseract.js";
+import type { SourceTextBlock } from "./types";
+import { PdfStructureLimitError, reconstructPdfPage } from "./pdf-structure.ts";
+import { reconstructOcrPage, type OcrPageResult } from "./ocr-structure.ts";
 
 export type ImportFileOptions = {
   signal: AbortSignal;
   onStatus: (message: string) => void;
+  onPdfDetected?: () => void;
 };
 
-export type ImportFileResult = { text: string; needsReview: boolean; usedOcr: boolean };
+export type ImportFileResult = { text: string; needsReview: boolean; usedOcr: boolean; sourceBlocks?: SourceTextBlock[] };
 
 export const IMPORT_LIMITS = Object.freeze({
   fileBytes: 25 * 1024 * 1024,
@@ -193,6 +197,8 @@ export async function importFile(file: File, options: ImportFileOptions): Promis
   const signature = new TextDecoder("latin1").decode(bytes.slice(0, 5));
   let result: ImportFileResult;
   if (signature === "%PDF-" || name.endsWith(".pdf") || file.type === "application/pdf") {
+    options.onPdfDetected?.();
+    checkAbort(signal);
     result = await importPdf(bytes, options);
   } else if (name.endsWith(".docx") || file.type.includes("wordprocessingml")) {
     try {
@@ -254,11 +260,12 @@ function needsPageOcr(text: string) {
   return (text.match(/[\p{L}\p{N}]/gu)?.length ?? 0) < 40 || poorText(text);
 }
 
-async function readPdfItems(page: PDFPageProxy, signal: AbortSignal, remainingItems: number): Promise<unknown[]> {
-  const reader = page.streamTextContent().getReader();
+async function readPdfItems(page: PDFPageProxy, signal: AbortSignal, remainingItems: number) {
+  const reader = page.streamTextContent({ includeMarkedContent: true }).getReader();
   const cancel = () => { void reader.cancel().catch(() => {}); };
   signal.addEventListener("abort", cancel, { once: true });
   const items: unknown[] = [];
+  const styles: Record<string, { fontFamily?: string }> = Object.create(null);
   let chars = 0;
   const deadline = Date.now() + IMPORT_LIMITS.pdfOperationMs;
   try {
@@ -270,13 +277,19 @@ async function readPdfItems(page: PDFPageProxy, signal: AbortSignal, remainingIt
       if (chunk.done) break;
       if (items.length + chunk.value.items.length > IMPORT_LIMITS.pdfPageItems) limit(`Una p\u00e1gina PDF supera el l\u00edmite de ${IMPORT_LIMITS.pdfPageItems.toLocaleString("es-MX")} fragmentos de texto.`);
       if (items.length + chunk.value.items.length > remainingItems) limit(`El PDF supera el l\u00edmite total de ${IMPORT_LIMITS.pdfTotalItems.toLocaleString("es-MX")} fragmentos de texto.`);
+      for (const [fontName, style] of Object.entries(chunk.value.styles ?? {})) {
+        if (fontName.length <= 512 && Object.keys(styles).length < 256
+          && typeof style === "object" && style !== null && "fontFamily" in style && typeof style.fontFamily === "string") {
+          styles[fontName] = { fontFamily: style.fontFamily.slice(0, 512) };
+        }
+      }
       for (const item of chunk.value.items) {
         if ("str" in item) chars += item.str.length;
         checkTextSize(chars, IMPORT_LIMITS.pdfPageChars);
         items.push(item);
       }
     }
-    return items;
+    return { items, styles };
   } finally {
     signal.removeEventListener("abort", cancel);
     await reader.cancel().catch(() => {});
@@ -319,9 +332,10 @@ async function importPdf(bytes: ArrayBuffer, { signal, onStatus }: ImportFileOpt
     if (!Number.isInteger(pdf.numPages) || pdf.numPages < 1) throw new Error("El PDF no contiene p\u00e1ginas v\u00e1lidas.");
     if (pdf.numPages > IMPORT_LIMITS.pdfPages) limit(`El PDF supera el l\u00edmite de ${IMPORT_LIMITS.pdfPages} p\u00e1ginas.`);
     const pages: string[] = [];
+    const sourceBlocks: SourceTextBlock[] = [];
     for (currentPage = 1; currentPage <= pdf.numPages; currentPage++) {
       checkAbort(signal);
-      onStatus(`PDF: p\u00e1gina ${currentPage} de ${pdf.numPages}. Extrayendo texto...`);
+      onStatus(`PDF: p\u00e1gina ${currentPage} de ${pdf.numPages}. Identificando estructura...`);
       const page = await pdfOperation(pdf.getPage(currentPage), signal);
       let canvas: HTMLCanvasElement | undefined;
       try {
@@ -329,10 +343,19 @@ async function importPdf(bytes: ArrayBuffer, { signal, onStatus }: ImportFileOpt
         if (![base.width, base.height].every((size) => Number.isFinite(size) && size > 0 && size <= IMPORT_LIMITS.pdfMaxDimension)) {
           limit("Una p\u00e1gina PDF tiene dimensiones no compatibles (m\u00e1ximo 14.400 puntos por lado).");
         }
-        const items = await readPdfItems(page, signal, IMPORT_LIMITS.pdfTotalItems - totalItems);
+        const { items, styles } = await readPdfItems(page, signal, IMPORT_LIMITS.pdfTotalItems - totalItems);
         totalItems += items.length;
-        const extracted = extractPdfPage(items);
+        let structure: unknown;
+        try {
+          structure = await pdfOperation(page.getStructTree(), signal, 5_000);
+        } catch {
+          checkAbort(signal);
+          // Invalid or slow optional tags must not discard the visible text.
+          needsReview = true;
+        }
+        const extracted = reconstructPdfPage(items, { styles, structure, pageWidth: base.width, pageHeight: base.height });
         let text = extracted.text;
+        let blocks = extracted.blocks;
         needsReview ||= extracted.needsReview;
         if (needsPageOcr(text)) {
           if (++ocrPages > IMPORT_LIMITS.pdfOcrPages) limit(`El PDF necesita OCR en m\u00e1s de ${IMPORT_LIMITS.pdfOcrPages} p\u00e1ginas.`);
@@ -359,11 +382,15 @@ async function importPdf(bytes: ArrayBuffer, { signal, onStatus }: ImportFileOpt
             canvas!.toBlob((blob) => blob ? resolve(blob) : reject(new Error("No se pudo convertir la p\u00e1gina para OCR.")), "image/png");
           }), signal);
           const recognized = await ocr.recognize(image);
-          checkTextSize(recognized.length, IMPORT_LIMITS.pdfPageChars);
+          checkTextSize(recognized.text.length, IMPORT_LIMITS.pdfPageChars);
           usedOcr = true;
           needsReview = true;
           // Keep a short valid digital title if OCR finds nothing on that page.
-          if (recognized.trim()) text = recognized.trim();
+          if (recognized.text.trim()) {
+            const reconstructed = reconstructOcrPage(recognized, { width: canvas.width, height: canvas.height });
+            text = reconstructed.text;
+            blocks = reconstructed.blocks;
+          }
         }
         text = text.trim();
         checkTextSize(text.length, IMPORT_LIMITS.pdfPageChars);
@@ -371,6 +398,7 @@ async function importPdf(bytes: ArrayBuffer, { signal, onStatus }: ImportFileOpt
           totalChars += text.length + (pages.length ? 2 : 0);
           checkTextSize(totalChars);
           pages.push(text);
+          sourceBlocks.push(...blocks);
         }
       } finally {
         if (renderTask) {
@@ -382,10 +410,11 @@ async function importPdf(bytes: ArrayBuffer, { signal, onStatus }: ImportFileOpt
         page.cleanup();
       }
     }
-    return { text: pages.join("\n\n"), needsReview, usedOcr };
+    return { text: pages.join("\n\n"), needsReview, usedOcr, sourceBlocks };
   } catch (error) {
     checkAbort(signal);
     if (error instanceof ImportLimitError) throw error;
+    if (error instanceof PdfStructureLimitError) throw new ImportLimitError(error.message);
     const detail = error instanceof Error ? error.message : String(error);
     throw new Error(`No se pudo procesar el PDF${currentPage ? ` en la p\u00e1gina ${currentPage}` : ""}. Comprueba que no est\u00e9 da\u00f1ado o protegido con contrase\u00f1a. Verifica los recursos de reader-assets y la conexi\u00f3n para OCR. ${detail}`, { cause: error });
   } finally {
@@ -419,8 +448,27 @@ function ocrHostMain() {
         await worker.setParameters({ tessedit_pageseg_mode: scope.Tesseract.PSM.AUTO });
         scope.postMessage({ ready: true });
       } else if (data.image && worker) {
-        const result = await worker.recognize(data.image);
-        scope.postMessage({ text: result.data.text });
+        const result = await worker.recognize(data.image, {}, { text: true, blocks: true });
+        if (result.data.text.length > 100_000) throw new Error("El texto OCR supera el límite de 100,000 caracteres por página.");
+        const paragraphs: NonNullable<OcrPageResult["paragraphs"]> = [];
+        let count = 0;
+        let chars = 0;
+        // Tesseract's full blocks contain circular references and word/symbol
+        // trees. Copy only bounded paragraph/line geometry across the worker.
+        for (const block of result.data.blocks ?? []) {
+          for (const paragraph of block.paragraphs) {
+            if (paragraphs.length >= 20_000) throw new Error("El OCR contiene demasiados párrafos.");
+            const lines = [];
+            for (const line of paragraph.lines) {
+              chars += line.text.length;
+              if (++count > 20_000 || chars > 100_000) throw new Error("El OCR supera los límites de texto por página.");
+              const { x0, y0, x1, y1 } = line.bbox;
+              lines.push({ text: line.text, bbox: { x0, y0, x1, y1 }, confidence: line.confidence });
+            }
+            paragraphs.push({ lines });
+          }
+        }
+        scope.postMessage({ text: result.data.text, paragraphs });
       }
     } catch (error) { fail(error); }
   };
@@ -432,7 +480,7 @@ function createOcrHost(signal: AbortSignal, onStatus: (message: string) => void)
   let host: Worker;
   try { host = new Worker(url); } finally { URL.revokeObjectURL(url); }
   let stopped = false;
-  let settle: { resolve: (text: string) => void; reject: (error: Error) => void } | undefined;
+  let settle: { resolve: (page: OcrPageResult) => void; reject: (error: Error) => void } | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const terminate = () => {
     if (stopped) return;
@@ -443,14 +491,14 @@ function createOcrHost(signal: AbortSignal, onStatus: (message: string) => void)
     settle?.reject(abortError());
     settle = undefined;
   };
-  const wait = () => new Promise<string>((resolve, reject) => {
+  const wait = () => new Promise<OcrPageResult>((resolve, reject) => {
     settle = { resolve, reject };
     timer = setTimeout(() => {
       settle?.reject(new Error("OCR excedi\u00f3 el tiempo de espera. Revisa tu conexi\u00f3n o usa un PDF m\u00e1s sencillo."));
       terminate();
     }, 180_000);
   });
-  host.onmessage = ({ data }: MessageEvent<{ error?: string; ready?: boolean; text?: string; status?: string; progress?: number }>) => {
+  host.onmessage = ({ data }: MessageEvent<{ error?: string; ready?: boolean; text?: string; paragraphs?: OcrPageResult["paragraphs"]; status?: string; progress?: number }>) => {
     if (stopped || signal.aborted) return;
     if (data.status) {
       onStatus(data.status === "recognizing text"
@@ -459,7 +507,7 @@ function createOcrHost(signal: AbortSignal, onStatus: (message: string) => void)
     } else {
       clearTimeout(timer);
       if (data.error) settle?.reject(new Error(`OCR no disponible: ${data.error}`));
-      else settle?.resolve(data.text ?? "");
+      else settle?.resolve({ text: data.text ?? "", paragraphs: data.paragraphs });
       settle = undefined;
     }
   };
@@ -486,244 +534,14 @@ function createOcrHost(signal: AbortSignal, onStatus: (message: string) => void)
   };
 }
 
-type PdfItem = { str: string; transform?: number[]; width?: number; height?: number; hasEOL?: boolean };
-type PdfPart = { x: number; y: number; width: number; height: number; text: string };
-type PdfLine = { y: number; height: number; parts: PdfPart[] };
-type PdfReadingLine = { y: number; x: number; end: number; height: number; text: string; bullet: boolean; contentX: number };
-
-function weightedHeight(values: { height: number; text: string }[]) {
-  let remaining = values.reduce((sum, value) => sum + value.text.length, 0) / 2;
-  for (const value of [...values].sort((a, b) => a.height - b.height)) {
-    remaining -= value.text.length;
-    if (remaining <= 0) return value.height;
+/** Compatibility text export; the importer also retains the recovered blocks. */
+export function pdfPageText(items: unknown[]): string {
+  try {
+    return reconstructPdfPage(items).text;
+  } catch (error) {
+    if (error instanceof PdfStructureLimitError) throw new ImportLimitError(error.message);
+    throw error;
   }
-  return 12;
-}
-
-function readingLine(line: PdfLine): PdfReadingLine {
-  // A short superscript or bullet glyph must not determine the line's font size.
-  const height = weightedHeight(line.parts);
-  const fragments: string[] = [];
-  let previousEnd = -Infinity;
-  for (const part of line.parts) {
-    if (fragments.length && part.x - previousEnd > height * 0.24) fragments.push(" ");
-    fragments.push(part.text);
-    previousEnd = Math.max(previousEnd, part.x + part.width);
-  }
-  const text = fragments.join("").replace(/\s+/g, " ").trim().replace(/^[\u2022\u00b7\u25aa\u25ab\u25a0\u25a1\u25c6\u25c7\u25cb\u25cf\u25e6]\s*/, "- ");
-  const marker = text.match(/^(?:[-*]|(?:\d+(?:\.\d+)*|[a-zA-Z])[.)])\s+/);
-  const x = line.parts[0].x;
-  const firstPartIsMarker = /^(?:[-*\u2022\u00b7\u25aa\u25ab\u25a0\u25a1\u25c6\u25c7\u25cb\u25cf\u25e6]|(?:\d+(?:\.\d+)*|[a-zA-Z])[.)])$/.test(line.parts[0].text);
-  const contentX = firstPartIsMarker && line.parts.length > 1 ? line.parts[1].x
-    : x + (marker?.[0].length ?? 0) * height * 0.45;
-  return { y: line.y, x, end: previousEnd, height, text, bullet: !!marker, contentX };
-}
-
-function ambiguousPdf(): never {
-  throw new Error("No se pudo establecer un orden de lectura fiable para esta p\u00e1gina PDF (columnas, tabla o texto girado). Exporta una versi\u00f3n de una columna o copia el texto en el lector para revisarlo.");
-}
-
-// Only a persistent empty gutter supports column order. Full-width headings and
-// paragraphs divide vertical bands; each band's left column precedes its right.
-function columnGutter(rows: PdfLine[], runs: PdfReadingLine[][], span: number, bodyHeight: number): number | undefined {
-  if (runs.filter((row) => row.length > 2).length >= 2) ambiguousPdf();
-  const gaps = runs.flatMap((row) => row.length === 2
-    ? [{ left: row[0].end + row[0].height * 0.5, right: row[1].x - row[1].height * 0.5 }] : []);
-  const events = gaps.flatMap((gap) => gap.right > gap.left ? [{ x: gap.left, delta: 1 }, { x: gap.right, delta: -1 }] : [])
-    .sort((a, b) => a.x - b.x);
-  const support = Math.max(2, Math.ceil(rows.length * 0.25));
-  const regions: { left: number; right: number }[] = [];
-  let count = 0;
-  for (let index = 0; index < events.length;) {
-    const x = events[index].x;
-    while (index < events.length && events[index].x === x) count += events[index++].delta;
-    const next = events[index]?.x;
-    if (next !== undefined && next > x && count >= support) {
-      const previous = regions[regions.length - 1];
-      if (previous?.right === x) previous.right = next;
-      else regions.push({ left: x, right: next });
-    }
-  }
-  if (regions.length > 1) ambiguousPdf();
-  if (regions.length) return (regions[0].left + regions[0].right) / 2;
-
-  // Staggered baselines may never put both columns in the same row. In that
-  // case require a global empty gutter with at least two lines on either side.
-  const narrow = runs.flat().filter((line) => line.end - line.x < span * 0.65 && line.height < bodyHeight * 1.2)
-    .sort((a, b) => a.x - b.x);
-  const occupied: { left: number; right: number; count: number }[] = [];
-  for (const line of narrow) {
-    const previous = occupied[occupied.length - 1];
-    if (previous && line.x <= previous.right) {
-      previous.right = Math.max(previous.right, line.end);
-      previous.count++;
-    } else occupied.push({ left: line.x, right: line.end, count: 1 });
-  }
-  let leftCount = 0;
-  const candidates: number[] = [];
-  for (let index = 0; index < occupied.length - 1; index++) {
-    leftCount += occupied[index].count;
-    const gap = occupied[index + 1].left - occupied[index].right;
-    if (leftCount >= 2 && narrow.length - leftCount >= 2 && gap > Math.max(bodyHeight * 1.25, span * 0.025)) {
-      candidates.push((occupied[index + 1].left + occupied[index].right) / 2);
-    }
-  }
-  if (candidates.length > 1) ambiguousPdf();
-  return candidates[0];
-}
-
-function renderPdfLines(ordered: PdfReadingLine[], bodyHeight: number) {
-  // Bucket comparable fonts once instead of filtering/sorting every line's full
-  // page of spacing samples. This keeps adversarial unique font sizes bounded.
-  const fontBucket = (height: number) => Math.round(Math.log(height) / Math.log(1.15));
-  const spacing = new Map<number, number[]>();
-  for (let index = 1; index < ordered.length; index++) {
-    const line = ordered[index];
-    const previous = ordered[index - 1];
-    if (Math.max(previous.height, line.height) / Math.min(previous.height, line.height) > 1.15) continue;
-    const gap = previous.y - line.y;
-    if (gap >= line.height * 0.5 && gap <= line.height * 4) {
-      const key = fontBucket(line.height);
-      const values = spacing.get(key) ?? [];
-      values.push(gap);
-      spacing.set(key, values);
-    }
-  }
-  const leading = new Map([...spacing].map(([key, gaps]) => {
-    gaps.sort((a, b) => a - b);
-    return [key, gaps[Math.floor((gaps.length - 1) * 0.35)]];
-  }));
-  const leadingFor = (height: number) => leading.get(fontBucket(height)) ?? height * 1.5;
-  const blocks: { parts: string[]; heading: boolean; bullet: boolean; contentX: number }[] = [];
-  ordered.forEach((line, index) => {
-    const previous = ordered[index - 1];
-    const block = blocks[blocks.length - 1];
-    const heading = !line.bullet && line.height >= bodyHeight * 1.2 && line.text.length <= 180;
-    const baseline = previous ? Math.max(leadingFor(previous.height), leadingFor(line.height)) : 0;
-    const paragraphGap = !!previous && previous.y - line.y > Math.max(baseline * 1.35, baseline + line.height * 0.4);
-    const fontChange = !!previous && Math.max(previous.height, line.height) / Math.min(previous.height, line.height) > 1.25;
-    const indentation = !!previous && !block?.bullet && /[.!?]$/.test(previous.text) && line.x - previous.x > line.height * 0.8;
-    const listEnded = !!block?.bullet && line.x < block.contentX - line.height * 0.4;
-    const headingContinuation = heading && block?.heading && !!previous && !paragraphGap
-      && Math.max(previous.height, line.height) / Math.min(previous.height, line.height) <= 1.15;
-    if (!block || ((heading || block.heading) && !headingContinuation) || line.bullet || paragraphGap || fontChange || indentation || listEnded) {
-      const prefix = heading ? (line.height >= bodyHeight * 1.5 ? "# " : "### ") : "";
-      blocks.push({ parts: [prefix + line.text], heading, bullet: line.bullet, contentX: line.contentX });
-    } else {
-      const last = block.parts.length - 1;
-      if (block.parts[last].endsWith("-") && /^[\p{Ll}\p{M}]/u.test(line.text)) {
-        block.parts[last] = block.parts[last].slice(0, -1);
-        block.parts.push(line.text);
-      } else block.parts.push(` ${line.text}`);
-    }
-  });
-  return blocks.map((block) => block.parts.join("")).join("\n\n");
-}
-
-// Exported for geometry and downstream block-classification regression tests.
-export function pdfPageText(items: unknown[]) {
-  return extractPdfPage(items).text;
-}
-
-function extractPdfPage(items: unknown[]): { text: string; needsReview: boolean } {
-  if (items.length > IMPORT_LIMITS.pdfPageItems) limit(`Una p\u00e1gina PDF supera el l\u00edmite de ${IMPORT_LIMITS.pdfPageItems.toLocaleString("es-MX")} fragmentos de texto.`);
-  const valid = items.filter((item): item is PdfItem => typeof item === "object" && item !== null && "str" in item && typeof item.str === "string");
-  let chars = 0;
-  const parts: PdfPart[] = [];
-  let unpositioned = 0;
-  for (const item of valid) {
-    chars += item.str.length;
-    checkTextSize(chars, IMPORT_LIMITS.pdfPageChars);
-    const text = item.str.trim();
-    if (!text) continue;
-    if (!item.transform) { unpositioned++; continue; }
-    if (!Array.isArray(item.transform) || item.transform.length < 6
-      || item.transform.some((value) => !Number.isFinite(value) || Math.abs(value) > 1_000_000)
-      || (item.width !== undefined && !Number.isFinite(item.width))
-      || (item.height !== undefined && !Number.isFinite(item.height))) ambiguousPdf();
-    const [a, b, c, d, x, y] = item.transform;
-    if (Math.abs(b) > Math.abs(a) * 0.1 || Math.abs(c) > Math.abs(d) * 0.1) ambiguousPdf();
-    const height = Math.max(Math.abs(item.height ?? 0), Math.hypot(c, d), 1);
-    const width = Math.max(item.width ?? text.length * height * 0.45, 0);
-    if (height > IMPORT_LIMITS.pdfMaxDimension || width > 1_000_000) ambiguousPdf();
-    parts.push({ x, y, width, height, text });
-  }
-  if (!parts.length) {
-    const text = valid.map((item) => item.str + (item.hasEOL ? "\n" : "")).join("").trim();
-    checkTextSize(text.length, IMPORT_LIMITS.pdfPageChars);
-    return { text, needsReview: !!text };
-  }
-  if (unpositioned) ambiguousPdf();
-  // Sorting once replaces the former full lines.find scan per fragment.
-  parts.sort((a, b) => b.y - a.y || a.x - b.x);
-  const lines: PdfLine[] = [];
-  for (const part of parts) {
-    let line = lines[lines.length - 1];
-    if (!line || Math.abs(line.y - part.y) > Math.max(2, part.height * 0.35)) {
-      line = { y: part.y, height: part.height, parts: [] };
-      lines.push(line);
-    }
-    line.height = Math.max(line.height, part.height);
-    line.parts.push(part);
-  }
-  for (const line of lines) line.parts.sort((a, b) => a.x - b.x);
-  let minimumX = Infinity;
-  let maximumX = -Infinity;
-  for (const part of parts) {
-    minimumX = Math.min(minimumX, part.x);
-    maximumX = Math.max(maximumX, part.x + part.width);
-  }
-  const span = maximumX - minimumX;
-  const runs = lines.map((line) => {
-    const groups: PdfLine[] = [];
-    let end = -Infinity;
-    for (const part of line.parts) {
-      let group = groups[groups.length - 1];
-      if (!group || part.x - end > Math.max(line.height * 1.25, span * 0.025)) {
-        group = { y: line.y, height: line.height, parts: [] };
-        groups.push(group);
-      }
-      group.parts.push(part);
-      end = Math.max(end, part.x + part.width);
-    }
-    return groups.map(readingLine);
-  });
-  const bodyHeight = weightedHeight(runs.flat());
-  const gutter = columnGutter(lines, runs, span, bodyHeight);
-  let text: string;
-  if (gutter === undefined) {
-    text = renderPdfLines(lines.map(readingLine), bodyHeight);
-  } else {
-    const sections: string[] = [];
-    let left: PdfReadingLine[] = [];
-    let right: PdfReadingLine[] = [];
-    let wide: PdfReadingLine[] = [];
-    const flushColumns = () => {
-      if (left.length) sections.push(renderPdfLines(left, bodyHeight));
-      if (right.length) sections.push(renderPdfLines(right, bodyHeight));
-      left = []; right = [];
-    };
-    const flushWide = () => {
-      if (wide.length) sections.push(renderPdfLines(wide, bodyHeight));
-      wide = [];
-    };
-    for (const row of runs) {
-      const crossing = row.some((line) => line.x < gutter && line.end > gutter);
-      if (crossing) {
-        if (row.length > 1) ambiguousPdf();
-        flushColumns();
-        wide.push(row[0]);
-      } else {
-        flushWide();
-        for (const line of row) (line.end <= gutter ? left : right).push(line);
-      }
-    }
-    flushWide();
-    flushColumns();
-    text = sections.join("\n\n");
-  }
-  checkTextSize(text.length, IMPORT_LIMITS.pdfPageChars);
-  return { text, needsReview: gutter !== undefined };
 }
 
 function structuredHtmlText(root: Element) {

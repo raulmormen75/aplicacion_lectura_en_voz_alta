@@ -467,6 +467,14 @@
   box-shadow: none;
 }
 
+.book-layout .text-block-bullet.numbered-bullet {
+  padding-left: 0;
+}
+
+.book-layout .text-block-bullet.numbered-bullet::before {
+  content: none;
+}
+
 .book-layout .word {
   padding: 0;
   border-radius: 2px;
@@ -1244,4 +1252,116 @@
 
 .book-layout .focus-control-dock .text-size-control {
   flex: 0 0 auto;
+}
+
+.book-layout .pdf-import-dialog {
+  position: fixed;
+  inset: 0;
+  width: min(480px, calc(100vw - 32px));
+  height: fit-content;
+  max-height: calc(100dvh - 32px);
+  margin: auto;
+  border: 1px solid #c6a75e66;
+  border-radius: 16px;
+  padding: 28px;
+  overflow-y: auto;
+  background: #171918;
+  color: #f2f2ee;
+  box-shadow: 0 24px 80px #0008;
+}
+
+.book-layout .pdf-import-dialog[open] {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.book-layout .pdf-import-dialog::backdrop {
+  background: #080a09a6;
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+}
+
+.book-layout .pdf-import-icon {
+  display: grid;
+  width: 52px;
+  height: 52px;
+  place-items: center;
+  border-radius: 12px;
+  background: #c6a75e1c;
+  color: var(--gold);
+}
+
+.book-layout .pdf-import-dialog h2 {
+  margin: 0;
+  font-size: 22px;
+  line-height: 1.3;
+  font-weight: 650;
+}
+
+.book-layout .pdf-import-dialog p {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.55;
+  text-wrap: pretty;
+}
+
+.book-layout .pdf-import-file {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #bdbdb5;
+}
+
+.book-layout .pdf-import-fidelity {
+  border-left: 2px solid var(--gold);
+  padding-left: 12px;
+  color: #d5d3c8;
+}
+
+.book-layout .pdf-import-status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  color: var(--gold);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.book-layout .pdf-import-status svg {
+  flex: 0 0 auto;
+  animation: pdf-import-spin 1.2s linear infinite;
+}
+
+.book-layout .pdf-import-progress {
+  width: 100%;
+  height: 5px;
+  accent-color: var(--gold);
+}
+
+.book-layout .pdf-import-cancel {
+  min-height: 44px;
+  border: 1px solid #ffffff38;
+  border-radius: 6px;
+  padding: 10px 16px;
+  background: #ffffff08;
+  color: inherit;
+  font-size: 14px;
+}
+
+.book-layout .pdf-import-cancel:hover {
+  background: #c6a75e21;
+}
+
+@keyframes pdf-import-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .book-layout .pdf-import-status svg { animation: none; }
+}
+
+@media (max-width: 359px) {
+  .book-layout .pdf-import-dialog { padding: 20px; }
 }

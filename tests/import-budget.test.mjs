@@ -3,6 +3,8 @@ import test from "node:test";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import vm from "node:vm";
+import * as pdfStructure from "../src/lib/reader/pdf-structure.ts";
+import * as ocrStructure from "../src/lib/reader/ocr-structure.ts";
 
 const require = createRequire(import.meta.url);
 const ts = require("typescript");
@@ -19,6 +21,8 @@ function importer(pdfjs, environment = {}) {
     module: compiledModule, exports: compiledModule.exports,
     require(name) {
       if (name === "pdfjs-dist") return pdfjs;
+      if (name === "./pdf-structure.ts") return pdfStructure;
+      if (name === "./ocr-structure.ts") return ocrStructure;
       throw Error(`Unexpected dependency: ${name}`);
     },
     window: { location: { href: "https://reader.invalid/" } },
@@ -34,7 +38,7 @@ function textItem(str = "Este documento sintetico tiene suficiente texto para le
 }
 
 function pdfFixture({ pages = 1, items = () => [textItem()], viewport = { width: 612, height: 792 }, hang = false } = {}) {
-  const stats = { destroyed: 0, requested: 0, streams: 0, cancelled: 0, cleaned: 0, renders: 0, canvases: [], renderDimensions: [], settings: undefined };
+  const stats = { destroyed: 0, requested: 0, streams: 0, cancelled: 0, cleaned: 0, renders: 0, canvases: [], renderDimensions: [], settings: undefined, extractionOptions: undefined };
   const pdfjs = {
     GlobalWorkerOptions: {},
     getDocument: (settings) => {
@@ -47,8 +51,10 @@ function pdfFixture({ pages = 1, items = () => [textItem()], viewport = { width:
           return {
             getViewport({ scale }) { return { width: viewport.width * scale, height: viewport.height * scale }; },
             getTextContent() { throw Error("Must extract bounded chunks, not a complete page array."); },
-            streamTextContent() {
+            async getStructTree() { return null; },
+            streamTextContent(options) {
               stats.streams++;
+              stats.extractionOptions = options;
               return new ReadableStream({
                 start(controller) {
                   if (!hang) { controller.enqueue({ items: items(number) }); controller.close(); }
@@ -82,6 +88,7 @@ test("PDF.js receives finite image decoding and worker canvas budgets", async ()
   await compiledModule.importFile(file(), options());
   assert.equal(fixture.stats.settings.maxImageSize, compiledModule.IMPORT_LIMITS.pdfImagePixels);
   assert.equal(fixture.stats.settings.canvasMaxAreaInBytes, compiledModule.IMPORT_LIMITS.pdfCanvasPixels * 4);
+  assert.equal(fixture.stats.extractionOptions.includeMarkedContent, true);
   assert.equal(fixture.stats.destroyed, 1);
 });
 

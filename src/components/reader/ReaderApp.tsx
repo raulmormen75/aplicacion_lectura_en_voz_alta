@@ -24,9 +24,9 @@ import Image from "next/image";
 import { flushSync } from "react-dom";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent, CSSProperties } from "react";
+import { PdfImportDialog } from "./PdfImportDialog";
 import {
   calculatePercentage,
-  cleanTextWithoutInventing,
   countWords,
   createDocumentFromText,
   estimateRemainingSeconds,
@@ -69,6 +69,7 @@ type VisibleTextPart = {
 type VisibleTextBlock = {
   id: string;
   kind: TextBlockKind;
+  numbered?: boolean;
   parts: VisibleTextPart[];
 };
 
@@ -88,6 +89,7 @@ export function ReaderApp() {
   const [pastedText, setPastedText] = useState(SAMPLE_TEXT);
   const [url, setUrl] = useState("");
   const [isProcessing, setIsProcessing] = useState(false);
+  const [pdfImportName, setPdfImportName] = useState<string | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [focusControlsVisible, setFocusControlsVisible] = useState(true);
   const [statusMessage, setStatusMessage] = useState("Listo para leer.");
@@ -121,6 +123,7 @@ export function ReaderApp() {
 
   const document = state.document;
   const hasDocument = Boolean(document);
+  const isPdfProcessing = isProcessing && pdfImportName !== null;
   const preferences = state.preferences;
   const spanishVoices = useMemo(() => spanishDeviceVoices(systemVoices), [systemVoices]);
   const selectedSystemVoice = preferredSpanishVoice(systemVoices, preferences.systemVoiceURI);
@@ -179,6 +182,7 @@ export function ReaderApp() {
       .map((block) => ({
         id: block.id,
         kind: block.kind,
+        numbered: block.kind === "bullet" && /^(?:\d+(?:\.\d+)*|[a-zA-Z])[.)]\s/.test(block.text),
         parts: createVisibleTextParts({
           block,
           cleanText: document.cleanText,
@@ -324,6 +328,7 @@ export function ReaderApp() {
       nativeFullscreen = active;
     };
     const escape = (event: KeyboardEvent) => {
+      if (isPdfProcessing) return;
       if (event.key !== "Escape") return;
       if (isVoiceMenuOpen) { setIsVoiceMenuOpen(false); return; }
       setState((current) => current.preferences.readingMode === "focus" ? { ...current, preferences: { ...current.preferences, readingMode: "standard" } } : current);
@@ -334,7 +339,7 @@ export function ReaderApp() {
       globalThis.document.removeEventListener("fullscreenchange", syncFullscreen);
       window.removeEventListener("keydown", escape);
     };
-  }, [isVoiceMenuOpen]);
+  }, [isVoiceMenuOpen, isPdfProcessing]);
 
   useEffect(() => {
     if (!isVoiceMenuOpen) return;
@@ -508,21 +513,34 @@ export function ReaderApp() {
       return;
     }
 
-    setIsProcessing(true);
     const controller = new AbortController();
     processingAbortRef.current = controller;
-    setStatusMessage("Extrayendo texto del archivo.");
+    const isPdf = /\.pdf$/i.test(file.name) || file.type === "application/pdf";
+    stopPlayback();
+    flushSync(() => {
+      setIsPlaying(false);
+      setIsProcessing(true);
+      setPdfImportName(isPdf ? file.name || "Documento PDF" : null);
+      setStatusMessage(isPdf ? "Analizando la estructura del PDF..." : "Extrayendo texto del archivo.");
+    });
 
     try {
+      // Give the dialog a paint opportunity before local document processing.
+      await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+      if (controller.signal.aborted) return;
       const { importFile } = await import("@/lib/reader/import-file");
       const result = await importFile(file, {
         signal: controller.signal,
         onStatus: (message) => { if (!controller.signal.aborted) setStatusMessage(message); },
+        onPdfDetected: () => {
+          if (!controller.signal.aborted) flushSync(() => setPdfImportName(file.name || "Documento PDF"));
+        },
       });
       if (controller.signal.aborted) return;
       const prepared = createDocumentFromText({
         title: file.name || "Documento importado", source: "file", sourceLabel: file.type || "archivo local",
         text: result.text, qualityStatus: result.needsReview ? "needs-review" : "ready",
+        sourceBlocks: result.sourceBlocks,
         qualityMessage: result.usedOcr ? "Texto obtenido por OCR. Revisa nombres y cifras." : "Archivo procesado en este dispositivo.",
         ocrAvailable: result.needsReview,
       });
@@ -535,9 +553,17 @@ export function ReaderApp() {
     } catch (error) {
       if (!controller.signal.aborted) setImportError(error instanceof Error ? error.message : "No se pudo procesar el archivo.");
     } finally {
-      if (processingAbortRef.current === controller) processingAbortRef.current = null;
-      setIsProcessing(false);
+      if (processingAbortRef.current === controller) {
+        processingAbortRef.current = null;
+        setIsProcessing(false);
+        setPdfImportName(null);
+      }
     }
+  }
+
+  function cancelImport() {
+    processingAbortRef.current?.abort();
+    setStatusMessage("Importaci\u00f3n cancelada. Se conserva el documento anterior.");
   }
 
   async function processText() {
@@ -1037,24 +1063,23 @@ export function ReaderApp() {
 
   async function applyCleanOnly() {
     if (!document) return;
-    const cleaned = cleanTextWithoutInventing(document.originalText);
+    const prepared = createDocumentFromText({
+      title: document.title,
+      source: document.source,
+      sourceLabel: document.sourceLabel,
+      text: document.originalText,
+      sourceBlocks: document.blocks,
+      qualityStatus: "ready",
+      qualityMessage: "Limpieza local aplicada sin inventar contenido.",
+      ocrAvailable: false,
+    });
 
-    if (!cleaned.trim()) {
+    if (!prepared.wordCount) {
       setStatusMessage("No se pudo aplicar limpieza local porque no hay texto legible suficiente.");
       return;
     }
 
-    setDocument(
-      createDocumentFromText({
-        title: document.title,
-        source: document.source,
-        sourceLabel: document.sourceLabel,
-        text: cleaned,
-        qualityStatus: "ready",
-        qualityMessage: "Limpieza local aplicada sin inventar contenido.",
-        ocrAvailable: false,
-      }),
-    );
+    setDocument(prepared);
     setStatusMessage("Limpieza local aplicada. Revisa nombres y cifras antes de escuchar.");
   }
 
@@ -1500,7 +1525,7 @@ export function ReaderApp() {
                 </button>
               </div>
             ) : null}
-            {isProcessing ? <div className="import-progress"><p>{statusMessage}</p><button type="button" onClick={() => processingAbortRef.current?.abort()}>Cancelar</button></div> : null}
+            {isProcessing && !isPdfProcessing ? <div className="import-progress"><p>{statusMessage}</p><button type="button" onClick={cancelImport}>Cancelar</button></div> : null}
             {importError ? <p className="import-error" role="alert">{importError}</p> : null}
           </div> : null}
 
@@ -1583,6 +1608,7 @@ export function ReaderApp() {
 
 
       {preferences.readingMode === "focus" && focusControlsVisible ? renderFocusControls() : null}
+      <PdfImportDialog open={isPdfProcessing} fileName={pdfImportName ?? ""} status={statusMessage} onCancel={cancelImport} />
     </main>
   );
 }
@@ -1719,7 +1745,7 @@ function renderStructuredTextBlock(
       <span key={part.id}>{part.text}</span>
     ),
   );
-  const className = `text-block text-block-${block.kind}`;
+  const className = `text-block text-block-${block.kind}${block.numbered ? " numbered-bullet" : ""}`;
 
   if (block.kind === "heading") {
     return (

@@ -18,6 +18,9 @@ export type WordToken = {
 
 export type TextBlockKind = "heading" | "subheading" | "paragraph" | "bullet";
 
+/** Classification recovered from a document before offsets are assigned. */
+export type SourceTextBlock = { kind: TextBlockKind; text: string };
+
 export type TextBlock = {
   id: string;
   kind: TextBlockKind;
