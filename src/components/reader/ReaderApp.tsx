@@ -108,7 +108,7 @@ export function ReaderApp() {
   const [isProcessing, setIsProcessing] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
   const [focusControlsVisible, setFocusControlsVisible] = useState(true);
-  const [statusMessage, setStatusMessage] = useState("Avance guardado en este dispositivo.");
+  const [statusMessage, setStatusMessage] = useState("Listo para leer.");
   const [importError, setImportError] = useState<string | null>(null);
   const [systemVoices, setSystemVoices] = useState<SpeechSynthesisVoice[]>([]);
   const [playbackError, setPlaybackError] = useState("");
@@ -1144,7 +1144,7 @@ export function ReaderApp() {
       }
       clearProgressTimer();
       setIsPlaying(false);
-      setStatusMessage("Lectura pausada. Avance guardado.");
+      setStatusMessage("Lectura pausada.");
       return;
     }
 
@@ -1442,7 +1442,7 @@ export function ReaderApp() {
     stopPlayback();
     setIsPlaying(false);
     updateProgress(0);
-    setStatusMessage("Lectura reiniciada. Avance guardado.");
+    setStatusMessage("Lectura reiniciada.");
   }
 
   function setTemporaryMode(enabled: boolean) {

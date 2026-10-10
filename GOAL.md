@@ -2,6 +2,8 @@
 
 Mejorar En voz, corregir el diagnóstico y publicar cambios verificados en GitHub y Vercel.
 
+Verificación de producción completada el 10 de octubre de 2026 UTC (9 de octubre en México): commit `9cc4e1a`, Vercel READY, CI satisfactoria y ambas voces remotas devuelven audio real. Evidencias, tiempos y mejoras pendientes en `INFORME_MEJORAS_2026_10_10.md`.
+
 ## Condiciones
 
 - Navegar entre líneas y párrafos sin diálogos de preparación de voz.

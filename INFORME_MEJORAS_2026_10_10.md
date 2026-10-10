@@ -95,8 +95,20 @@ Consulta de estas tarjetas primarias: 10 de octubre de 2026. Sus capacidades dec
 - La prueba local del proxy falló al validar DNS de los Spaces (`EAI_AGAIN`). Una conexión HTTPS convencional posterior sí respondió 200, pero no acredita el transporte con validación/pinning. La integración final debe comprobarse desde Vercel; el fallo local no se presenta como una generación satisfactoria.
 - No se han probado Android/iOS físicos, voces de cada sistema, documentos privados del usuario ni todas las composiciones PDF/OCR posibles.
 
-La comprobación de GitHub/Vercel se incorpora a este informe después de publicar. Un build local no acredita que la versión esté activa en el dominio.
+Un build local no acredita que la versión esté activa en el dominio; las siguientes comprobaciones se hicieron sobre producción.
 
 El primer commit de código es `3a7bfba69aad6c114ed44c0bd90a0a6510781cb9`. GitHub Actions completó instalación, tests, lint, build limpio y navegador satisfactoriamente en el job `114093860849`. El primer intento de Vercel compiló Next correctamente, pero su postbuild no encontró el HTML en la ruta antigua del generador; se corrige la compatibilidad del precache con el adapter actual sin omitir la verificación de integridad ni la condición de shell estático.
 
 La corrección se verificó en una compilación limpia con un adaptador temporal real de Next 16.4. El generador original reprodujo exactamente el error `ENOENT`; el corregido terminó con código 0 y generó los 16 recursos. El HTML y el favicon coinciden por hash con los outputs actuales de `server/route-cache`. Cuatro regresiones adicionales comprueban ambos layouts, rutas agrupadas, archivos residuales, outputs ausentes y rechazo de shells incompletos/ISR/error. No se añadió el adaptador temporal a la configuración del repositorio.
+
+## Comprobación de producción
+
+El commit de corrección `9cc4e1a49a02e1277b62d304e80a202cfda77b04` llegó a **READY** en Vercel, despliegue `dpl_43uVE7zKMqsnL9ydJhSjFiLj37Bs`, y se asignó a [la aplicación](https://aplicacionparaleerenvozalta.vercel.app/). [GitHub Actions](https://github.com/raulmormen75/aplicacion_lectura_en_voz_alta/actions/runs/38012709071) completó instalación, 294 pruebas, lint, build y navegador con resultado satisfactorio.
+
+La API `/api/speech` del dominio publicado devolvió 400 para una voz inválida y 200 para ambas voces reales, con `audio/wav` y `no-store`. Para una frase pública de 11 palabras, México tardó 7,566 s y Dora 6,783 s; los WAV PCM mono de 24 kHz contienen 3,760 s y 3,008 s de audio no silencioso, respectivamente. Son dos mediciones puntuales, no una garantía de latencia, continuidad ni calidad audible.
+
+En la interfaz publicada se activó lectura temporal antes de pegar texto de prueba. México y Dora llegaron a reproducción y fin/pausa sin avisos de error; el salto de línea con audio preparado mantuvo la reproducción y no abrió un diálogo. La pausa conservó la posición. Se corrigió además el texto de estado que afirmaba «avance guardado» al pausar/reiniciar aunque la sesión fuese temporal; estos mensajes describen ahora únicamente el estado de reproducción.
+
+El dominio responde 200 y sirve CSP, `nosniff` y `X-Frame-Options: DENY`. Los **16 recursos del manifiesto offline publicado**, 1.110.195 bytes en este build de Vercel, se descargaron y todos coincidieron con sus hashes. La recarga PWA realmente sin conexión se verificó en los perfiles aislados de navegador/CI; no se simula haber puesto sin conexión el navegador de producción.
+
+[Captura de la interfaz publicada](docs/verification/en-voz-produccion-1791595494922.jpg), tomada sobre el commit `9cc4e1a` después de las pruebas reales de ambas voces. Los registros del navegador no mostraron errores propios de la aplicación; aparecieron errores de metadatos de una extensión del navegador, ajenos al código del lector.
